@@ -1,0 +1,6 @@
+{
+  "name": "ClubFlow - College Club Management",
+  "description": "Centralized platform for managing college clubs, members, departments, tasks, events, attendance, working hours, and announcements.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
