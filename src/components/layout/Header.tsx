@@ -10,6 +10,9 @@ import {
   CheckSquare,
   Users,
   Megaphone,
+  LogIn,
+  LogOut,
+  Database as DatabaseIcon,
 } from 'lucide-react';
 import { Avatar } from '../common/Avatar';
 import { Member, ClubNotification, ClubSettings } from '../../types';
@@ -34,6 +37,10 @@ interface HeaderProps {
   announcements?: import('../../types').Announcement[];
   onSelectPersona?: (member: Member) => void;
   clubSettings?: ClubSettings;
+  onOpenAuth?: () => void;
+  isSupabaseAuth?: boolean;
+  onSignOut?: () => void;
+  isConnectedToSupabase?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -54,6 +61,10 @@ export const Header: React.FC<HeaderProps> = ({
   announcements = [],
   onSelectPersona,
   clubSettings,
+  onOpenAuth,
+  isSupabaseAuth = false,
+  onSignOut,
+  isConnectedToSupabase = false,
 }) => {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showClubDropdown, setShowClubDropdown] = useState(false);
@@ -530,6 +541,50 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
         </div>
+
+        {/* Supabase Connection Status Badge */}
+        <div
+          title={
+            isConnectedToSupabase
+              ? 'Connected to Supabase PostgreSQL (Row Level Security Active)'
+              : 'Running in Local Demo Sandbox (Configure VITE_SUPABASE_URL to connect)'
+          }
+          className={`hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium border ${
+            isConnectedToSupabase
+              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+              : 'bg-amber-50 text-amber-700 border-amber-200'
+          }`}
+        >
+          <span
+            className={`w-2 h-2 rounded-full ${
+              isConnectedToSupabase ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
+            }`}
+          />
+          <DatabaseIcon className="w-3 h-3" />
+          <span>{isConnectedToSupabase ? 'Supabase Live' : 'Demo Sandbox'}</span>
+        </div>
+
+        {/* Authentication Button */}
+        {isSupabaseAuth ? (
+          <button
+            type="button"
+            onClick={onSignOut}
+            title="Sign Out of Supabase Account"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:text-rose-600 hover:bg-rose-50 border border-slate-200 hover:border-rose-200 rounded-xl transition cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Sign Out</span>
+          </button>
+        ) : onOpenAuth ? (
+          <button
+            type="button"
+            onClick={onOpenAuth}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-xl transition cursor-pointer shadow-2xs"
+          >
+            <LogIn className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Sign In</span>
+          </button>
+        ) : null}
 
         {/* Role Persona Switcher for prototyping and permissions testing */}
         {onSelectPersona && (

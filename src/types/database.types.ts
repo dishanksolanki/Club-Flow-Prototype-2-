@@ -630,6 +630,7 @@ export interface Database {
           target_department_id: string | null;
           priority: AnnouncementPriority;
           pinned: boolean;
+          is_pinned?: boolean;
           created_at: string;
           updated_at: string;
         };
@@ -642,6 +643,7 @@ export interface Database {
           target_department_id?: string | null;
           priority?: AnnouncementPriority;
           pinned?: boolean;
+          is_pinned?: boolean;
           created_at?: string;
           updated_at?: string;
         };
@@ -654,6 +656,7 @@ export interface Database {
           target_department_id?: string | null;
           priority?: AnnouncementPriority;
           pinned?: boolean;
+          is_pinned?: boolean;
           created_at?: string;
           updated_at?: string;
         };
@@ -775,6 +778,21 @@ export interface Database {
       is_department_lead: {
         Args: { target_dept_id: string };
         Returns: boolean;
+      };
+      create_notification: {
+        Args: {
+          p_recipient_id: string;
+          p_title: string;
+          p_message: string;
+          p_type: string;
+          p_link_tab?: string | null;
+          p_item_id?: string | null;
+        };
+        Returns: string;
+      };
+      bootstrap_initial_president: {
+        Args: { target_email: string };
+        Returns: void;
       };
     };
     Enums: {

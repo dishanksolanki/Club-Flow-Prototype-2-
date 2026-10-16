@@ -96,6 +96,34 @@ export const notificationsService = {
     }
 
     try {
+      // 1. Prefer RPC create_notification for strict server-side security checks
+      const { data: rpcId, error: rpcError } = await supabase.rpc('create_notification', {
+        p_recipient_id: params.recipient_id,
+        p_title: params.title,
+        p_message: params.message,
+        p_type: params.type,
+        p_link_tab: params.link_tab ?? null,
+        p_item_id: params.item_id ?? null,
+      });
+
+      if (!rpcError && rpcId) {
+        return {
+          data: {
+            id: rpcId,
+            recipient_id: params.recipient_id,
+            title: params.title,
+            message: params.message,
+            type: params.type,
+            link_tab: params.link_tab ?? null,
+            item_id: params.item_id ?? null,
+            read: false,
+            created_at: new Date().toISOString(),
+          },
+          error: null,
+        };
+      }
+
+      // 2. Direct table insert fallback (permitted for Executives by RLS)
       const { data, error } = await supabase
         .from('notifications')
         .insert({
@@ -110,7 +138,7 @@ export const notificationsService = {
         .select()
         .single();
 
-      return { data, error };
+      return { data, error: error || rpcError };
     } catch (err) {
       return { data: null, error: err as Error };
     }

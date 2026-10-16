@@ -1,8 +1,9 @@
 -- ==============================================================================
--- ClubFlow - Comprehensive Supabase Database Migration (Security Hardened v5)
+-- ClubFlow - Comprehensive Supabase Database Migration (Security Hardened v6)
 -- File: supabase/migrations/20261016000001_clubflow_init.sql
 -- Description: Core schema, enums, tables, foreign keys, triggers, strict RLS,
---              column-level access enforcement, and security-hardened functions.
+--              column-level access enforcement, automated metric synchronizations,
+--              audit immutability, and security-hardened functions.
 -- ==============================================================================
 
 -- ------------------------------------------------------------------------------
@@ -146,6 +147,8 @@ CREATE TABLE IF NOT EXISTS public.departments (
   description TEXT NOT NULL DEFAULT '',
   tools TEXT[] NOT NULL DEFAULT '{}',
   color_theme TEXT NOT NULL DEFAULT 'indigo',
+  lead_id UUID,
+  co_lead_id UUID,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -177,6 +180,22 @@ CREATE INDEX IF NOT EXISTS idx_profiles_department ON public.profiles(department
 CREATE INDEX IF NOT EXISTS idx_profiles_hierarchy ON public.profiles(hierarchy_role);
 CREATE INDEX IF NOT EXISTS idx_profiles_status ON public.profiles(status);
 
+-- Circular foreign keys for department leads (safe addition after profiles exists)
+DO $$ BEGIN
+  ALTER TABLE public.departments
+    ADD CONSTRAINT fk_departments_lead FOREIGN KEY (lead_id) REFERENCES public.profiles(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE public.departments
+    ADD CONSTRAINT fk_departments_co_lead FOREIGN KEY (co_lead_id) REFERENCES public.profiles(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_dept_lead ON public.departments(lead_id);
+CREATE INDEX IF NOT EXISTS idx_dept_co_lead ON public.departments(co_lead_id);
+
 -- 3.4. Tasks
 CREATE TABLE IF NOT EXISTS public.tasks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -194,6 +213,7 @@ CREATE TABLE IF NOT EXISTS public.tasks (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_dept ON public.tasks(department_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to ON public.tasks(assigned_to);
+CREATE INDEX IF NOT EXISTS idx_tasks_assigned_by ON public.tasks(assigned_by);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON public.tasks(status);
 
 -- 3.5. Task Submissions
@@ -227,25 +247,32 @@ CREATE TABLE IF NOT EXISTS public.task_activity_logs (
 
 CREATE INDEX IF NOT EXISTS idx_task_act_task ON public.task_activity_logs(task_id);
 
--- 3.7. Events
+-- 3.7. Events (Supports both event_date/date, venue/location, start_time/time, and tags)
 CREATE TABLE IF NOT EXISTS public.events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
-  date DATE NOT NULL,
-  time TEXT NOT NULL,
-  location TEXT NOT NULL,
+  event_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  date DATE NOT NULL DEFAULT CURRENT_DATE,
+  start_time TEXT NOT NULL DEFAULT '10:00 AM',
+  end_time TEXT NOT NULL DEFAULT '12:00 PM',
+  time TEXT NOT NULL DEFAULT '10:00 AM - 12:00 PM',
+  venue TEXT NOT NULL DEFAULT 'Campus Auditorium',
+  location TEXT NOT NULL DEFAULT 'Campus Auditorium',
   type public.event_type NOT NULL DEFAULT 'General',
   status public.event_status NOT NULL DEFAULT 'Upcoming',
   department_id UUID NOT NULL REFERENCES public.departments(id) ON DELETE CASCADE,
   organizer_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE RESTRICT,
   capacity INT CHECK (capacity IS NULL OR capacity > 0),
+  tags TEXT[] NOT NULL DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_dept ON public.events(department_id);
+CREATE INDEX IF NOT EXISTS idx_events_organizer ON public.events(organizer_id);
 CREATE INDEX IF NOT EXISTS idx_events_date ON public.events(date);
+CREATE INDEX IF NOT EXISTS idx_events_event_date ON public.events(event_date);
 
 -- 3.8. Event RSVPs
 CREATE TABLE IF NOT EXISTS public.event_rsvps (
@@ -263,11 +290,15 @@ CREATE INDEX IF NOT EXISTS idx_rsvps_member ON public.event_rsvps(member_id);
 -- 3.9. Attendance Records
 CREATE TABLE IF NOT EXISTS public.attendance_records (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id UUID REFERENCES public.events(id) ON DELETE SET NULL,
   event_name TEXT NOT NULL,
   event_date DATE NOT NULL DEFAULT CURRENT_DATE,
   member_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   department_id UUID NOT NULL REFERENCES public.departments(id) ON DELETE CASCADE,
+  check_in_time TEXT NOT NULL DEFAULT '—',
   status public.attendance_status NOT NULL DEFAULT 'Present',
+  session_type TEXT NOT NULL DEFAULT 'General Meeting',
+  duration_hours NUMERIC(4,2),
   notes TEXT,
   recorded_by UUID NOT NULL REFERENCES public.profiles(id) ON DELETE RESTRICT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -276,7 +307,9 @@ CREATE TABLE IF NOT EXISTS public.attendance_records (
 
 CREATE INDEX IF NOT EXISTS idx_att_member ON public.attendance_records(member_id);
 CREATE INDEX IF NOT EXISTS idx_att_dept ON public.attendance_records(department_id);
+CREATE INDEX IF NOT EXISTS idx_att_recorded_by ON public.attendance_records(recorded_by);
 CREATE INDEX IF NOT EXISTS idx_att_date ON public.attendance_records(event_date);
+CREATE INDEX IF NOT EXISTS idx_att_event ON public.attendance_records(event_id);
 
 -- 3.10. Working Hours
 CREATE TABLE IF NOT EXISTS public.working_hours (
@@ -297,9 +330,10 @@ CREATE TABLE IF NOT EXISTS public.working_hours (
 
 CREATE INDEX IF NOT EXISTS idx_wh_member ON public.working_hours(member_id);
 CREATE INDEX IF NOT EXISTS idx_wh_dept ON public.working_hours(department_id);
+CREATE INDEX IF NOT EXISTS idx_wh_verified_by ON public.working_hours(verified_by);
 CREATE INDEX IF NOT EXISTS idx_wh_status ON public.working_hours(status);
 
--- 3.11. Announcements
+-- 3.11. Announcements (Supports both pinned and is_pinned)
 CREATE TABLE IF NOT EXISTS public.announcements (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL,
@@ -307,13 +341,16 @@ CREATE TABLE IF NOT EXISTS public.announcements (
   audience public.announcement_audience NOT NULL DEFAULT 'All Members',
   target_department_id UUID REFERENCES public.departments(id) ON DELETE CASCADE,
   posted_by UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  pinned BOOLEAN NOT NULL DEFAULT FALSE,
   is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+  priority public.announcement_priority NOT NULL DEFAULT 'Normal',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_ann_audience ON public.announcements(audience);
 CREATE INDEX IF NOT EXISTS idx_ann_target_dept ON public.announcements(target_department_id);
+CREATE INDEX IF NOT EXISTS idx_ann_posted_by ON public.announcements(posted_by);
 
 -- 3.12. Notifications
 CREATE TABLE IF NOT EXISTS public.notifications (
@@ -403,11 +440,71 @@ CREATE TRIGGER tr_announcements_updated_at
   BEFORE UPDATE ON public.announcements
   FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
 
+-- 4.2 Column Synchronization Triggers (Events & Announcements compatibility)
+CREATE OR REPLACE FUNCTION public.handle_event_column_sync()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  -- Sync event_date and date
+  IF NEW.event_date IS NOT NULL AND (NEW.date IS NULL OR (TG_OP = 'UPDATE' AND NEW.event_date IS DISTINCT FROM OLD.event_date)) THEN
+    NEW.date := NEW.event_date;
+  ELSIF NEW.date IS NOT NULL AND NEW.event_date IS NULL THEN
+    NEW.event_date := NEW.date;
+  END IF;
+
+  -- Sync venue and location
+  IF NEW.venue IS NOT NULL AND (NEW.location IS NULL OR (TG_OP = 'UPDATE' AND NEW.venue IS DISTINCT FROM OLD.venue)) THEN
+    NEW.location := NEW.venue;
+  ELSIF NEW.location IS NOT NULL AND NEW.venue IS NULL THEN
+    NEW.venue := NEW.location;
+  END IF;
+
+  -- Sync start_time/end_time and time
+  IF NEW.start_time IS NOT NULL AND (NEW.time IS NULL OR (TG_OP = 'UPDATE' AND NEW.start_time IS DISTINCT FROM OLD.start_time)) THEN
+    NEW.time := NEW.start_time || COALESCE(' - ' || NEW.end_time, '');
+  ELSIF NEW.time IS NOT NULL AND NEW.start_time IS NULL THEN
+    NEW.start_time := NEW.time;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_events_column_sync ON public.events;
+CREATE TRIGGER tr_events_column_sync
+  BEFORE INSERT OR UPDATE ON public.events
+  FOR EACH ROW EXECUTE FUNCTION public.handle_event_column_sync();
+
+CREATE OR REPLACE FUNCTION public.handle_announcement_pin_sync()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF NEW.pinned IS NOT NULL AND (NEW.is_pinned IS NULL OR NEW.pinned <> NEW.is_pinned) THEN
+    NEW.is_pinned := NEW.pinned;
+  ELSIF NEW.is_pinned IS NOT NULL AND (NEW.pinned IS NULL OR NEW.pinned <> NEW.is_pinned) THEN
+    NEW.pinned := NEW.is_pinned;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_announcements_pin_sync ON public.announcements;
+CREATE TRIGGER tr_announcements_pin_sync
+  BEFORE INSERT OR UPDATE ON public.announcements
+  FOR EACH ROW EXECUTE FUNCTION public.handle_announcement_pin_sync();
+
 -- ------------------------------------------------------------------------------
 -- 5. RLS & PRIVILEGE HELPER FUNCTIONS (HARDENED SECURITY DEFINER)
 -- ------------------------------------------------------------------------------
 
 -- 5.1. Strictly identify trusted database administrators or server-side service role context
+-- Includes 'supabase_auth_admin' to ensure GoTrue daemon signup triggers run securely
 CREATE OR REPLACE FUNCTION public.is_trusted_admin()
 RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -417,8 +514,8 @@ AS $$
 DECLARE
   v_jwt_role TEXT;
 BEGIN
-  -- 1. Direct administrative database session (Supabase SQL Editor, psql, migrations, pg_cron)
-  IF session_user IN ('postgres', 'supabase_admin') THEN
+  -- 1. Direct administrative database session (Supabase SQL Editor, psql, migrations, pg_cron, GoTrue auth)
+  IF session_user IN ('postgres', 'supabase_admin', 'supabase_auth_admin') THEN
     BEGIN
       v_jwt_role := NULLIF(current_setting('request.jwt.claim.role', true), '');
     EXCEPTION WHEN OTHERS THEN
@@ -565,9 +662,19 @@ BEGIN
     RAISE EXCEPTION 'Recipient profile does not exist.';
   END IF;
 
-  -- Only executives, department leads, or system triggers can dispatch notifications
+  -- Only executives or department leads can dispatch notifications
   IF NOT v_is_exec AND v_caller_role NOT IN ('Department Head', 'Department Co-Head') THEN
     RAISE EXCEPTION 'Security Policy Violation: Insufficient privileges to dispatch notifications.';
+  END IF;
+
+  -- Department leads can only notify members within their assigned department
+  IF NOT v_is_exec THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM public.profiles
+      WHERE id = p_recipient_id AND (department_id = public.auth_department_id() OR department_id IS NULL)
+    ) THEN
+      RAISE EXCEPTION 'Security Policy Violation: Department leads can only notify members within their assigned department.';
+    END IF;
   END IF;
 
   INSERT INTO public.notifications (
@@ -594,7 +701,7 @@ AS $$
 DECLARE
   v_caller_role public.hierarchy_role;
 BEGIN
-  -- Trusted administrators (Supabase SQL Editor / service_role / auth trigger)
+  -- Trusted administrators (Supabase SQL Editor / service_role / GoTrue auth trigger)
   IF public.is_trusted_admin() THEN
     NEW.role := NEW.hierarchy_role::text;
     RETURN NEW;
@@ -644,10 +751,23 @@ DECLARE
   v_caller_role public.hierarchy_role;
   v_is_exec BOOLEAN;
 BEGIN
+  -- 0. Internal automated metric synchronization bypass (tasks_completed, working_hours, attendance_rate)
+  IF current_setting('clubflow.internal_metric_sync', true) = 'true' THEN
+    -- Prevent role escalation or profile property alteration during metric sync
+    IF NEW.hierarchy_role IS DISTINCT FROM OLD.hierarchy_role OR
+       NEW.role IS DISTINCT FROM OLD.role OR
+       NEW.department_id IS DISTINCT FROM OLD.department_id OR
+       NEW.status IS DISTINCT FROM OLD.status OR
+       NEW.email IS DISTINCT FROM OLD.email THEN
+      RAISE EXCEPTION 'Security Policy Violation: Administrative profile fields cannot be modified during automated metric synchronization.';
+    END IF;
+    RETURN NEW;
+  END IF;
+
   -- 1. Trusted DB sessions and service_role can make necessary updates
   IF public.is_trusted_admin() THEN
     -- Ensure role stays synchronized with hierarchy_role
-    IF NEW.hierarchy_role IS DISTINCT FROM OLD.hierarchy_role THEN
+    IF NEW.hierarchy_role IS DISTINCT FROM OLD.hierarchy_role OR NEW.role IS DISTINCT FROM NEW.hierarchy_role::text THEN
       NEW.role := NEW.hierarchy_role::text;
     END IF;
     RETURN NEW;
@@ -733,7 +853,57 @@ CREATE TRIGGER tr_validate_profile_update
   FOR EACH ROW
   EXECUTE FUNCTION public.validate_profile_update();
 
--- 6.3. Task Submission Guard (Enforces field immutability, reviewer separation, and anti-self-approval)
+-- 6.3. Profile Delete Guard (Prevents unauthorized role deletion or deletion of the President)
+CREATE OR REPLACE FUNCTION public.validate_profile_delete()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_caller_role public.hierarchy_role;
+BEGIN
+  IF public.is_trusted_admin() THEN
+    RETURN OLD;
+  END IF;
+
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Security Policy Violation: Unauthenticated profile deletion is prohibited.';
+  END IF;
+
+  v_caller_role := public.auth_hierarchy_role();
+
+  -- Only President or Vice President can delete profiles
+  IF v_caller_role NOT IN ('President', 'Vice President') THEN
+    RAISE EXCEPTION 'Security Policy Violation: Only executive leadership may delete member profiles.';
+  END IF;
+
+  -- Prevent self-deletion of executive accounts
+  IF OLD.id = auth.uid() THEN
+    RAISE EXCEPTION 'Security Policy Violation: Self-deletion of executive accounts is prohibited.';
+  END IF;
+
+  -- The President account cannot be deleted via the client API
+  IF OLD.hierarchy_role = 'President' THEN
+    RAISE EXCEPTION 'Security Policy Violation: The President profile cannot be deleted via client operations.';
+  END IF;
+
+  -- Vice President cannot delete peer Vice Presidents or Faculty Advisors
+  IF v_caller_role = 'Vice President' AND OLD.hierarchy_role IN ('Vice President', 'Faculty Advisor') THEN
+    RAISE EXCEPTION 'Security Policy Violation: Vice Presidents cannot delete peer executive or governance accounts.';
+  END IF;
+
+  RETURN OLD;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_validate_profile_delete ON public.profiles;
+CREATE TRIGGER tr_validate_profile_delete
+  BEFORE DELETE ON public.profiles
+  FOR EACH ROW
+  EXECUTE FUNCTION public.validate_profile_delete();
+
+-- 6.4. Task Submission Guard (Enforces field immutability, reviewer separation, and anti-self-approval)
 CREATE OR REPLACE FUNCTION public.validate_task_submission()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -872,7 +1042,7 @@ CREATE TRIGGER tr_validate_task_submission
   FOR EACH ROW
   EXECUTE FUNCTION public.validate_task_submission();
 
--- 6.4. Working Hours Verification Guard
+-- 6.5. Working Hours Verification Guard
 CREATE OR REPLACE FUNCTION public.validate_working_hours()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -985,7 +1155,7 @@ CREATE TRIGGER tr_validate_working_hours
   FOR EACH ROW
   EXECUTE FUNCTION public.validate_working_hours();
 
--- 6.5. Tasks Column-Level Guard (Restricts assignee vs assigner vs executive changes)
+-- 6.6. Tasks Column-Level Guard (Restricts assignee vs assigner vs executive changes)
 CREATE OR REPLACE FUNCTION public.validate_task_modification()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -1017,7 +1187,7 @@ BEGIN
   IF TG_OP = 'INSERT' THEN
     v_is_dept_lead := (public.auth_hierarchy_role() IN ('Department Head', 'Department Co-Head') AND NEW.department_id = public.auth_department_id());
 
-    -- assigned_by cannot be spoofed
+    -- assigned_by cannot be spoofed by non-executives
     IF NEW.assigned_by <> v_caller_id AND NOT v_is_exec THEN
       RAISE EXCEPTION 'Security Policy Violation: assigned_by must be the authenticated user.';
     END IF;
@@ -1070,6 +1240,15 @@ BEGIN
       IF NEW.assigned_by IS DISTINCT FROM OLD.assigned_by THEN
         RAISE EXCEPTION 'Security Policy Violation: Cannot reassign task creator identity.';
       END IF;
+      -- Department leads cannot reassign tasks outside their department on UPDATE
+      IF NEW.assigned_to IS DISTINCT FROM OLD.assigned_to THEN
+        IF NOT EXISTS (
+          SELECT 1 FROM public.profiles
+          WHERE id = NEW.assigned_to AND (department_id = public.auth_department_id() OR department_id IS NULL)
+        ) THEN
+          RAISE EXCEPTION 'Security Policy Violation: Department leads can only assign tasks to members of their department.';
+        END IF;
+      END IF;
     END IF;
 
     -- Prevent non-executives from spoofing assigned_by
@@ -1090,7 +1269,7 @@ CREATE TRIGGER tr_validate_task_modification
   FOR EACH ROW
   EXECUTE FUNCTION public.validate_task_modification();
 
--- 6.6. Attendance Validation Guard (Member-Department affinity, recorded_by protection, and boundary enforcement)
+-- 6.7. Attendance Validation Guard (Member-Department affinity, recorded_by protection, and boundary enforcement)
 CREATE OR REPLACE FUNCTION public.validate_attendance_record()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -1168,7 +1347,7 @@ CREATE TRIGGER tr_validate_attendance
   FOR EACH ROW
   EXECUTE FUNCTION public.validate_attendance_record();
 
--- 6.7. Announcements Integrity Guard
+-- 6.8. Announcements Integrity Guard
 CREATE OR REPLACE FUNCTION public.validate_announcement()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -1245,7 +1424,7 @@ CREATE TRIGGER tr_validate_announcement
   FOR EACH ROW
   EXECUTE FUNCTION public.validate_announcement();
 
--- 6.8. Notification Read Status Guard (Guards recipient_id, payload, and timestamps)
+-- 6.9. Notification Read Status Guard (Guards recipient_id, payload, and timestamps)
 CREATE OR REPLACE FUNCTION public.validate_notification_update()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -1274,7 +1453,7 @@ CREATE TRIGGER tr_validate_notification
   FOR EACH ROW
   EXECUTE FUNCTION public.validate_notification_update();
 
--- 6.9. Activity Logs Integrity Guard (Strict Append-only enforcement)
+-- 6.10. Activity Logs Integrity Guard (Strict Append-only enforcement on INSERT)
 CREATE OR REPLACE FUNCTION public.validate_activity_log()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -1303,7 +1482,31 @@ CREATE TRIGGER tr_validate_task_activity_log
   FOR EACH ROW
   EXECUTE FUNCTION public.validate_activity_log();
 
--- 6.10. Events Integrity Guard
+-- 6.11. Activity Logs Immutability Lock (Hard engine-level defense against UPDATE or DELETE)
+CREATE OR REPLACE FUNCTION public.prevent_audit_log_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Security Policy Violation: Audit activity logs are append-only and cannot be updated or deleted.';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_lock_activity_logs ON public.activity_logs;
+CREATE TRIGGER tr_lock_activity_logs
+  BEFORE UPDATE OR DELETE ON public.activity_logs
+  FOR EACH ROW
+  EXECUTE FUNCTION public.prevent_audit_log_mutation();
+
+DROP TRIGGER IF EXISTS tr_lock_task_activity_logs ON public.task_activity_logs;
+CREATE TRIGGER tr_lock_task_activity_logs
+  BEFORE UPDATE OR DELETE ON public.task_activity_logs
+  FOR EACH ROW
+  EXECUTE FUNCTION public.prevent_audit_log_mutation();
+
+-- 6.12. Events Integrity Guard
 CREATE OR REPLACE FUNCTION public.validate_event_modification()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -1372,11 +1575,10 @@ CREATE TRIGGER tr_validate_event_modification
   EXECUTE FUNCTION public.validate_event_modification();
 
 -- ------------------------------------------------------------------------------
--- 7. AUTOMATED USER ONBOARDING & SECURE BOOTSTRAP
+-- 7. AUTOMATED USER ONBOARDING, METRIC SYNC & SECURE BOOTSTRAP
 -- ------------------------------------------------------------------------------
 
--- 7.1. Function to handle updated_at on auth users sync
--- 7.2. Automated Profile Provisioning on Supabase Auth Signup (Strictly Department Member)
+-- 7.1. Automated Profile Provisioning on Supabase Auth Signup (Resilient & Non-Escalating)
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -1386,18 +1588,27 @@ AS $$
 DECLARE
   v_full_name TEXT;
   v_initials TEXT;
+  v_email TEXT;
   v_first_dept_id UUID;
 BEGIN
   v_full_name := COALESCE(
-    NEW.raw_user_meta_data->>'full_name',
-    NEW.raw_user_meta_data->>'name',
-    split_part(NEW.email, '@', 1)
+    NULLIF(NEW.raw_user_meta_data->>'full_name', ''),
+    NULLIF(NEW.raw_user_meta_data->>'name', ''),
+    split_part(COALESCE(NEW.email, ''), '@', 1),
+    'Club Member'
   );
 
   v_initials := UPPER(SUBSTRING(v_full_name FROM 1 FOR 2));
   IF LENGTH(v_initials) = 0 THEN
     v_initials := 'CM';
   END IF;
+
+  -- Resilient email determination to safely accommodate phone-based or external OAuth signups
+  v_email := COALESCE(
+    NEW.email,
+    NULLIF(NEW.raw_user_meta_data->>'email', ''),
+    (COALESCE(NEW.phone, NEW.id::text) || '@member.clubflow')
+  );
 
   SELECT id INTO v_first_dept_id FROM public.departments WHERE name = 'Technical' LIMIT 1;
 
@@ -1417,7 +1628,7 @@ BEGIN
     join_date
   ) VALUES (
     NEW.id,
-    NEW.email,
+    v_email,
     v_full_name,
     v_initials,
     NEW.raw_user_meta_data->>'avatar_url',
@@ -1442,7 +1653,131 @@ CREATE TRIGGER on_auth_user_created
   FOR EACH ROW
   EXECUTE FUNCTION public.handle_new_user();
 
--- 7.3. Secure Initial President Bootstrap Function
+-- 7.2. Automated Duplicate-Safe Metric Synchronization: tasks_completed
+CREATE OR REPLACE FUNCTION public.sync_member_tasks_completed()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_target_member_id UUID;
+  v_completed_count INT;
+BEGIN
+  v_target_member_id := COALESCE(NEW.submitted_by, OLD.submitted_by);
+  IF v_target_member_id IS NULL THEN
+    RETURN COALESCE(NEW, OLD);
+  END IF;
+
+  -- Count distinct tasks where at least one deliverable submission was Approved (duplicate-safe)
+  SELECT COUNT(DISTINCT task_id) INTO v_completed_count
+  FROM public.task_submissions
+  WHERE submitted_by = v_target_member_id AND review_status = 'Approved';
+
+  -- Set transaction-scoped internal sync flag to pass validate_profile_update
+  PERFORM set_config('clubflow.internal_metric_sync', 'true', true);
+
+  UPDATE public.profiles
+  SET tasks_completed = v_completed_count
+  WHERE id = v_target_member_id;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_sync_tasks_completed ON public.task_submissions;
+CREATE TRIGGER tr_sync_tasks_completed
+  AFTER INSERT OR UPDATE OF review_status, submitted_by, task_id OR DELETE ON public.task_submissions
+  FOR EACH ROW
+  EXECUTE FUNCTION public.sync_member_tasks_completed();
+
+-- 7.3. Automated Duplicate-Safe Metric Synchronization: working_hours
+CREATE OR REPLACE FUNCTION public.sync_member_working_hours()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_target_member_id UUID;
+  v_total_hours NUMERIC(7,2);
+BEGIN
+  v_target_member_id := COALESCE(NEW.member_id, OLD.member_id);
+  IF v_target_member_id IS NULL THEN
+    RETURN COALESCE(NEW, OLD);
+  END IF;
+
+  -- Sum verified hours accurately
+  SELECT COALESCE(SUM(hours), 0.00) INTO v_total_hours
+  FROM public.working_hours
+  WHERE member_id = v_target_member_id AND status = 'Verified';
+
+  -- Set transaction-scoped internal sync flag to pass validate_profile_update
+  PERFORM set_config('clubflow.internal_metric_sync', 'true', true);
+
+  UPDATE public.profiles
+  SET working_hours = v_total_hours
+  WHERE id = v_target_member_id;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_sync_working_hours ON public.working_hours;
+CREATE TRIGGER tr_sync_working_hours
+  AFTER INSERT OR UPDATE OF status, hours, member_id OR DELETE ON public.working_hours
+  FOR EACH ROW
+  EXECUTE FUNCTION public.sync_member_working_hours();
+
+-- 7.4. Automated Duplicate-Safe Metric Synchronization: attendance_rate
+CREATE OR REPLACE FUNCTION public.sync_member_attendance_rate()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_target_member_id UUID;
+  v_total_records INT;
+  v_present_records INT;
+  v_calculated_rate NUMERIC(5,2);
+BEGIN
+  v_target_member_id := COALESCE(NEW.member_id, OLD.member_id);
+  IF v_target_member_id IS NULL THEN
+    RETURN COALESCE(NEW, OLD);
+  END IF;
+
+  SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE status IN ('Present', 'Late'))
+  INTO v_total_records, v_present_records
+  FROM public.attendance_records
+  WHERE member_id = v_target_member_id;
+
+  IF v_total_records = 0 THEN
+    v_calculated_rate := 100.00;
+  ELSE
+    v_calculated_rate := ROUND((v_present_records::numeric / v_total_records::numeric) * 100.00, 2);
+  END IF;
+
+  -- Set transaction-scoped internal sync flag to pass validate_profile_update
+  PERFORM set_config('clubflow.internal_metric_sync', 'true', true);
+
+  UPDATE public.profiles
+  SET attendance_rate = v_calculated_rate
+  WHERE id = v_target_member_id;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_sync_attendance_rate ON public.attendance_records;
+CREATE TRIGGER tr_sync_attendance_rate
+  AFTER INSERT OR UPDATE OF status, member_id OR DELETE ON public.attendance_records
+  FOR EACH ROW
+  EXECUTE FUNCTION public.sync_member_attendance_rate();
+
+-- 7.5. Secure Initial President Bootstrap Function
 -- One-time initialization executed exclusively by database administrator (postgres/service_role)
 CREATE OR REPLACE FUNCTION public.bootstrap_initial_president(target_email TEXT)
 RETURNS VOID
@@ -1580,7 +1915,9 @@ CREATE POLICY "profiles_delete_executives"
   ON public.profiles FOR DELETE
   TO authenticated
   USING (
-    public.auth_hierarchy_role() IN ('President', 'Vice President') AND id <> auth.uid()
+    -- The President profile cannot be deleted via RLS; Vice Presidents cannot delete higher/peer tiers
+    (public.auth_hierarchy_role() = 'President' AND id <> auth.uid() AND hierarchy_role <> 'President') OR
+    (public.auth_hierarchy_role() = 'Vice President' AND id <> auth.uid() AND hierarchy_role NOT IN ('President', 'Vice President', 'Faculty Advisor'))
   );
 
 -- 8.4. Tasks
@@ -1596,14 +1933,17 @@ CREATE POLICY "tasks_select_policy"
     assigned_by = auth.uid()
   );
 
+-- Aligns with trigger: executives can assign tasks directly, department leads can assign within their department
 DROP POLICY IF EXISTS "tasks_insert_policy" ON public.tasks;
 CREATE POLICY "tasks_insert_policy"
   ON public.tasks FOR INSERT
   TO authenticated
   WITH CHECK (
-    assigned_by = auth.uid() AND (
-      public.is_executive() OR
-      (public.auth_hierarchy_role() IN ('Department Head', 'Department Co-Head') AND department_id = public.auth_department_id())
+    public.is_executive() OR
+    (
+      assigned_by = auth.uid() AND
+      public.auth_hierarchy_role() IN ('Department Head', 'Department Co-Head') AND
+      department_id = public.auth_department_id()
     )
   );
 
@@ -1768,6 +2108,13 @@ DROP POLICY IF EXISTS "event_rsvps_insert_self" ON public.event_rsvps;
 CREATE POLICY "event_rsvps_insert_self"
   ON public.event_rsvps FOR INSERT
   TO authenticated
+  WITH CHECK (member_id = auth.uid() OR public.is_executive());
+
+DROP POLICY IF EXISTS "event_rsvps_update_policy" ON public.event_rsvps;
+CREATE POLICY "event_rsvps_update_policy"
+  ON public.event_rsvps FOR UPDATE
+  TO authenticated
+  USING (member_id = auth.uid() OR public.is_executive())
   WITH CHECK (member_id = auth.uid() OR public.is_executive());
 
 DROP POLICY IF EXISTS "event_rsvps_delete_self" ON public.event_rsvps;

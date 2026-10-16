@@ -27,6 +27,30 @@ import { EventDetailModal } from './components/modals/EventDetailModal';
 import { AnnouncementDetailModal } from './components/modals/AnnouncementDetailModal';
 import { UnauthorizedModal } from './components/common/UnauthorizedModal';
 import { CreateMemberModal } from './components/modals/CreateMemberModal';
+import { AuthModal } from './components/modals/AuthModal';
+import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
+import {
+  profilesService,
+  departmentsService,
+  tasksService,
+  eventsService,
+  attendanceService,
+  workingHoursService,
+  announcementsService,
+  notificationsService,
+  clubSettingsService,
+} from './services';
+import {
+  mapProfileToMember,
+  mapDepartmentToInfo,
+  mapTaskToModel,
+  mapEventToModel,
+  mapAttendanceToModel,
+  mapWorkingHourToModel,
+  mapAnnouncementToModel,
+  mapNotificationToModel,
+  mapClubSettingsToModel,
+} from './utils/supabaseMappers';
 import {
   canUserAssignTask,
   canUserCreateEvent,
@@ -130,6 +154,120 @@ export default function App() {
     const match = members.find((m) => m.hierarchyRole === role);
     if (match) {
       setCurrentUser(match);
+    }
+  };
+
+  // Supabase Authentication & Real Data States
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isSupabaseAuth, setIsSupabaseAuth] = useState(false);
+  const [isSupabaseLoading, setIsSupabaseLoading] = useState(false);
+  const isConfigured = isSupabaseConfigured();
+
+  const loadDataFromSupabase = async () => {
+    if (!isConfigured || !supabase) return;
+    setIsSupabaseLoading(true);
+    try {
+      // 1. Fetch departments, profiles, and club settings in parallel
+      const [deptRes, profRes, settingsRes] = await Promise.all([
+        departmentsService.getDepartments(),
+        profilesService.getProfiles(),
+        clubSettingsService.getSettings(),
+      ]);
+
+      const rawDepts = deptRes.data || [];
+      const rawProfs = profRes.data || [];
+
+      if (rawDepts.length > 0) {
+        const mappedDepts = rawDepts.map((d) => mapDepartmentToInfo(d, rawProfs));
+        setDepartments(mappedDepts);
+      }
+
+      if (rawProfs.length > 0) {
+        const mappedMembers = rawProfs.map((p) => mapProfileToMember(p, departments));
+        setMembers(mappedMembers);
+
+        // Check if user session is active
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData?.session?.user) {
+          setIsSupabaseAuth(true);
+          const activeProfile = rawProfs.find((p) => p.id === sessionData.session!.user.id);
+          if (activeProfile) {
+            setCurrentUser(mapProfileToMember(activeProfile, departments));
+          }
+        }
+      }
+
+      if (settingsRes.data) {
+        setClubSettings(mapClubSettingsToModel(settingsRes.data));
+      }
+
+      // 2. Fetch tasks, events, attendance, hours, and announcements
+      const [taskRes, eventRes, attRes, hourRes, annRes] = await Promise.all([
+        tasksService.getTasks(),
+        eventsService.getEvents(),
+        attendanceService.getAttendanceRecords(),
+        workingHoursService.getWorkingHours(),
+        announcementsService.getAnnouncements(),
+      ]);
+
+      if (taskRes.data && taskRes.data.length > 0) {
+        setTasks(taskRes.data.map((t) => mapTaskToModel(t, rawProfs, rawDepts)));
+      }
+      if (eventRes.data && eventRes.data.length > 0) {
+        setEvents(eventRes.data.map((e) => mapEventToModel(e, rawProfs, rawDepts)));
+      }
+      if (attRes.data && attRes.data.length > 0) {
+        setAttendanceRecords(attRes.data.map((a) => mapAttendanceToModel(a, rawProfs, rawDepts)));
+      }
+      if (hourRes.data && hourRes.data.length > 0) {
+        setWorkingHours(hourRes.data.map((h) => mapWorkingHourToModel(h, rawProfs, rawDepts)));
+      }
+      if (annRes.data && annRes.data.length > 0) {
+        setAnnouncements(annRes.data.map((a) => mapAnnouncementToModel(a, rawProfs, rawDepts)));
+      }
+
+      // 3. User notifications
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (sessionData?.session?.user) {
+        const notifRes = await notificationsService.getNotifications(sessionData.session.user.id);
+        if (notifRes.data && notifRes.data.length > 0) {
+          setNotifications(notifRes.data.map(mapNotificationToModel));
+        }
+      }
+    } catch (err) {
+      console.warn('[ClubFlow] Notice during Supabase sync:', err);
+    } finally {
+      setIsSupabaseLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isConfigured || !supabase) return;
+
+    loadDataFromSupabase();
+
+    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (session?.user) {
+        setIsSupabaseAuth(true);
+        const { data: prof } = await profilesService.getProfileById(session.user.id);
+        if (prof) {
+          setCurrentUser(mapProfileToMember(prof, departments));
+        }
+      } else {
+        setIsSupabaseAuth(false);
+      }
+    });
+
+    return () => {
+      authListener?.subscription?.unsubscribe();
+    };
+  }, []);
+
+  const handleSignOut = async () => {
+    if (supabase) {
+      await supabase.auth.signOut();
+      setIsSupabaseAuth(false);
+      setCurrentUser(CURRENT_USER);
     }
   };
 
@@ -586,6 +724,10 @@ export default function App() {
           announcements={announcements}
           onSelectPersona={handleSelectPersona}
           clubSettings={clubSettings}
+          onOpenAuth={() => setIsAuthModalOpen(true)}
+          isSupabaseAuth={isSupabaseAuth}
+          onSignOut={handleSignOut}
+          isConnectedToSupabase={isConfigured}
         />
 
         {/* Page Content Viewport */}
@@ -874,6 +1016,17 @@ export default function App() {
         reason={unauthorizedState.reason}
         recommendedRole={unauthorizedState.recommendedRole}
         onSwitchToRecommendedRole={handleSwitchToRecommendedRole}
+      />
+
+      {/* Supabase Authentication Modal (Login / Sign Up / Password Reset) */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onAuthSuccess={() => {
+          setIsAuthModalOpen(false);
+          loadDataFromSupabase();
+        }}
+        departments={departmentsList}
       />
     </div>
   );
