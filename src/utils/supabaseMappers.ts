@@ -87,6 +87,7 @@ export const mapTaskToModel = (
   const assignee = profiles.find((p) => p.id === t.assigned_to);
   const assigner = profiles.find((p) => p.id === t.assigned_by);
   const dept = departments.find((d) => d.id === t.department_id);
+  const submitter = profiles.find((p) => p.id === submission?.submitted_by);
 
   return {
     id: t.id,
@@ -103,7 +104,7 @@ export const mapTaskToModel = (
     submission: submission
       ? {
           submittedAt: submission.submitted_at,
-          submittedBy: assignee?.name || 'Member',
+          submittedBy: submitter?.name || assignee?.name || 'Member',
           submissionLink: submission.submission_link || undefined,
           submissionNotes: submission.submission_notes || undefined,
           reviewComment: submission.review_comment || undefined,

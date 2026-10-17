@@ -232,6 +232,7 @@ CREATE TABLE IF NOT EXISTS public.task_submissions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_submissions_task ON public.task_submissions(task_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_task_unique ON public.task_submissions(task_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_submitter ON public.task_submissions(submitted_by);
 CREATE INDEX IF NOT EXISTS idx_submissions_review_status ON public.task_submissions(review_status);
 
@@ -242,6 +243,7 @@ CREATE TABLE IF NOT EXISTS public.task_activity_logs (
   actor_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   action TEXT NOT NULL,
   details TEXT,
+  note TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

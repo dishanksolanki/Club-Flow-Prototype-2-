@@ -60,6 +60,7 @@ import {
   canUserReviewTask,
   canUserVerifyHours,
 } from './utils/permissions';
+import { AlertCircle, X } from 'lucide-react';
 
 // Mock Data
 import {
@@ -157,6 +158,30 @@ export default function App() {
     }
   };
 
+  // Database Error & Feedback Toast State
+  const [dbErrorToast, setDbErrorToast] = useState<{
+    title: string;
+    description: string;
+  } | null>(null);
+
+  const showDatabaseErrorToast = (title: string, description: string) => {
+    setDbErrorToast({ title, description });
+    const errNotif: ClubNotification = {
+      id: `err-${Date.now()}`,
+      title,
+      message: description,
+      timestamp: 'Just now',
+      read: false,
+      type: 'task',
+      linkTab: 'Tasks',
+    };
+    setNotifications((prev) => [errNotif, ...prev]);
+
+    setTimeout(() => {
+      setDbErrorToast((cur) => (cur?.title === title ? null : cur));
+    }, 6000);
+  };
+
   // Supabase Authentication & Real Data States
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isSupabaseAuth, setIsSupabaseAuth] = useState(false);
@@ -211,7 +236,7 @@ export default function App() {
       ]);
 
       if (taskRes.data && taskRes.data.length > 0) {
-        setTasks(taskRes.data.map((t) => mapTaskToModel(t, rawProfs, rawDepts)));
+        setTasks(taskRes.data.map((t) => mapTaskToModel(t, rawProfs, rawDepts, (t as any).submission)));
       }
       if (eventRes.data && eventRes.data.length > 0) {
         setEvents(eventRes.data.map((e) => mapEventToModel(e, rawProfs, rawDepts)));
@@ -336,14 +361,19 @@ export default function App() {
   };
 
   // Actions
-  const handleUpdateTask = (updatedTask: Task) => {
+  const handleUpdateTask = async (updatedTask: Task) => {
     const prevTask = tasks.find((t) => t.id === updatedTask.id);
     const wasCompleted = prevTask?.status === 'Completed' || prevTask?.status === 'Approved';
     const isNowCompleted = updatedTask.status === 'Completed' || updatedTask.status === 'Approved';
 
+    // Optimistic UI state update
     setTasks((prev) =>
       prev.map((t) => (t.id === updatedTask.id ? updatedTask : t))
     );
+    if (selectedTaskForDetail?.id === updatedTask.id) {
+      setSelectedTaskForDetail(updatedTask);
+    }
+
     if (updatedTask.status === 'Submitted') {
       recordActivity('Task submitted', currentUser.name, updatedTask.title, 'task');
     } else if (isNowCompleted) {
@@ -352,73 +382,166 @@ export default function App() {
         incrementMemberTasksCompleted(updatedTask.assignedTo);
       }
     }
-  };
 
-  const handleUpdateTaskStatus = (taskId: string, newStatus: TaskStatus) => {
-    const prevTask = tasks.find((t) => t.id === taskId);
-    const wasCompleted = prevTask?.status === 'Completed' || prevTask?.status === 'Approved';
-    const isNowCompleted = newStatus === 'Completed' || newStatus === 'Approved';
+    // Persist to Supabase if configured & authenticated
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const actorId = sessionData?.session?.user?.id || currentUser.id;
 
-    setTasks((prev) =>
-      prev.map((t) => {
-        if (t.id === taskId) {
-          const newEvent = {
-            id: `act-${Date.now()}`,
-            action: `Status changed to ${newStatus}`,
-            actor: currentUser.name,
-            timestamp: 'Just now',
-          };
-          if (newStatus === 'Submitted') {
-            recordActivity('Task submitted', currentUser.name, t.title, 'task');
-          } else if (isNowCompleted) {
-            recordActivity('Task completed', currentUser.name, t.title, 'task');
-            if (!wasCompleted) {
-              incrementMemberTasksCompleted(t.assignedTo);
+      // 1. Deliverable submission
+      if (
+        updatedTask.status === 'Submitted' &&
+        prevTask?.status !== 'Submitted' &&
+        updatedTask.submission
+      ) {
+        const { error } = await tasksService.submitDeliverable({
+          task_id: updatedTask.id,
+          submitted_by: actorId,
+          submission_link: updatedTask.submission.submissionLink,
+          submission_notes: updatedTask.submission.submissionNotes,
+        });
+
+        if (error) {
+          if (prevTask) {
+            setTasks((prev) => prev.map((t) => (t.id === updatedTask.id ? prevTask : t)));
+            if (selectedTaskForDetail?.id === updatedTask.id) {
+              setSelectedTaskForDetail(prevTask);
             }
           }
-
-          // Push notifications for task approvals/rejections
-          if (newStatus === 'Approved') {
-            const notif: ClubNotification = {
-              id: `notif-${Date.now()}`,
-              title: 'Task Approved',
-              message: `${currentUser.name} approved "${t.title}".`,
-              timestamp: 'Just now',
-              read: false,
-              type: 'task',
-              linkTab: 'Tasks',
-              itemId: t.id,
-            };
-            setNotifications((prevNotifs) => [notif, ...prevNotifs]);
-          } else if (newStatus === 'Rejected') {
-            const notif: ClubNotification = {
-              id: `notif-${Date.now()}`,
-              title: 'Task Needs Revision',
-              message: `"${t.title}" was marked as needing changes.`,
-              timestamp: 'Just now',
-              read: false,
-              type: 'task',
-              linkTab: 'Tasks',
-              itemId: t.id,
-            };
-            setNotifications((prevNotifs) => [notif, ...prevNotifs]);
-          }
-
-          return {
-            ...t,
-            status: newStatus,
-            history: [...(t.history || []), newEvent],
-          };
+          showDatabaseErrorToast('Failed to save deliverable submission', error.message);
+          return;
         }
-        return t;
-      })
-    );
+      }
+      // 2. Deliverable review (Approval or Rejection)
+      else if (
+        (updatedTask.status === 'Approved' || updatedTask.status === 'Rejected') &&
+        updatedTask.submission?.reviewStatus === updatedTask.status &&
+        prevTask?.submission?.reviewStatus !== updatedTask.status
+      ) {
+        const { error } = await tasksService.reviewSubmission({
+          task_id: updatedTask.id,
+          reviewed_by: actorId,
+          review_status: updatedTask.status as 'Approved' | 'Rejected',
+          review_comment: updatedTask.submission?.reviewComment,
+        });
+
+        if (error) {
+          if (prevTask) {
+            setTasks((prev) => prev.map((t) => (t.id === updatedTask.id ? prevTask : t)));
+            if (selectedTaskForDetail?.id === updatedTask.id) {
+              setSelectedTaskForDetail(prevTask);
+            }
+          }
+          showDatabaseErrorToast('Failed to save submission review', error.message);
+          return;
+        }
+      }
+      // 3. Status update
+      else if (updatedTask.status !== prevTask?.status) {
+        const { error } = await tasksService.updateTaskStatus(
+          updatedTask.id,
+          updatedTask.status,
+          actorId
+        );
+
+        if (error) {
+          if (prevTask) {
+            setTasks((prev) => prev.map((t) => (t.id === updatedTask.id ? prevTask : t)));
+            if (selectedTaskForDetail?.id === updatedTask.id) {
+              setSelectedTaskForDetail(prevTask);
+            }
+          }
+          showDatabaseErrorToast('Failed to update task status in Supabase', error.message);
+          return;
+        }
+      }
+    }
   };
 
-  const handleAddTask = (newTask: Task) => {
+  const handleUpdateTaskStatus = async (taskId: string, newStatus: TaskStatus) => {
+    const prevTask = tasks.find((t) => t.id === taskId);
+    if (!prevTask || prevTask.status === newStatus) return;
+
+    const wasCompleted = prevTask.status === 'Completed' || prevTask.status === 'Approved';
+    const isNowCompleted = newStatus === 'Completed' || newStatus === 'Approved';
+
+    const newEvent = {
+      id: `act-${Date.now()}`,
+      action: `Status changed to ${newStatus}`,
+      actor: currentUser.name,
+      timestamp: 'Just now',
+    };
+
+    const updatedTask: Task = {
+      ...prevTask,
+      status: newStatus,
+      history: [...(prevTask.history || []), newEvent],
+    };
+
+    // Optimistic UI state update
+    setTasks((prev) => prev.map((t) => (t.id === taskId ? updatedTask : t)));
+    if (selectedTaskForDetail?.id === taskId) {
+      setSelectedTaskForDetail(updatedTask);
+    }
+
+    if (newStatus === 'Submitted') {
+      recordActivity('Task submitted', currentUser.name, prevTask.title, 'task');
+    } else if (isNowCompleted) {
+      recordActivity('Task completed', currentUser.name, prevTask.title, 'task');
+      if (!wasCompleted) {
+        incrementMemberTasksCompleted(prevTask.assignedTo);
+      }
+    }
+
+    // Push local notification for approvals/rejections
+    if (newStatus === 'Approved') {
+      const notif: ClubNotification = {
+        id: `notif-${Date.now()}`,
+        title: 'Task Approved',
+        message: `${currentUser.name} approved "${prevTask.title}".`,
+        timestamp: 'Just now',
+        read: false,
+        type: 'task',
+        linkTab: 'Tasks',
+        itemId: prevTask.id,
+      };
+      setNotifications((prevNotifs) => [notif, ...prevNotifs]);
+    } else if (newStatus === 'Rejected') {
+      const notif: ClubNotification = {
+        id: `notif-${Date.now()}`,
+        title: 'Task Needs Revision',
+        message: `"${prevTask.title}" was marked as needing changes.`,
+        timestamp: 'Just now',
+        read: false,
+        type: 'task',
+        linkTab: 'Tasks',
+        itemId: prevTask.id,
+      };
+      setNotifications((prevNotifs) => [notif, ...prevNotifs]);
+    }
+
+    // Persist to Supabase if configured & authenticated
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const actorId = sessionData?.session?.user?.id || currentUser.id;
+
+      const { error } = await tasksService.updateTaskStatus(taskId, newStatus, actorId);
+      if (error) {
+        // Roll back failed optimistic update
+        setTasks((prev) => prev.map((t) => (t.id === taskId ? prevTask : t)));
+        if (selectedTaskForDetail?.id === taskId) {
+          setSelectedTaskForDetail(prevTask);
+        }
+        showDatabaseErrorToast('Failed to update task status in Supabase', error.message);
+      }
+    }
+  };
+
+  const handleAddTask = async (newTask: Task) => {
+    // Optimistic UI update
     setTasks((prev) => [newTask, ...prev]);
     recordActivity('Task assigned', currentUser.name, `${newTask.title} → ${newTask.assignedTo}`, 'task');
-    // Also push a notification
+
     const notif: ClubNotification = {
       id: `notif-${Date.now()}`,
       title: 'Task Assigned',
@@ -430,6 +553,50 @@ export default function App() {
       itemId: newTask.id,
     };
     setNotifications((prev) => [notif, ...prev]);
+
+    // Persist to Supabase if configured & authenticated
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const dept = departments.find((d) => d.name === newTask.department || d.id === (newTask as any).department_id);
+      const assignee = members.find((m) => m.name === newTask.assignedTo || m.id === (newTask as any).assigned_to);
+
+      if (!dept || !assignee) {
+        console.warn('Could not map department or assignee UUID for Supabase persistence');
+        return;
+      }
+
+      const { data: sessionData } = await supabase.auth.getSession();
+      const creatorId = sessionData?.session?.user?.id || currentUser.id;
+
+      const { data, error } = await tasksService.createTask({
+        title: newTask.title,
+        description: newTask.description,
+        department_id: dept.id,
+        assigned_by: creatorId,
+        assigned_to: assignee.id,
+        deadline: newTask.deadline,
+        priority: newTask.priority,
+        status: newTask.status,
+      });
+
+      if (error) {
+        // Roll back failed optimistic update
+        setTasks((prev) => prev.filter((t) => t.id !== newTask.id));
+        showDatabaseErrorToast('Failed to create task in Supabase', error.message);
+      } else if (data) {
+        // Replace temporary client ID with real Supabase generated ID and timestamps
+        setTasks((prev) =>
+          prev.map((t) =>
+            t.id === newTask.id
+              ? {
+                  ...t,
+                  id: data.id,
+                  createdAt: data.created_at,
+                }
+              : t
+          )
+        );
+      }
+    }
   };
 
   const handleLogHours = (record: WorkingHourRecord) => {
@@ -963,9 +1130,8 @@ export default function App() {
         isOpen={Boolean(selectedTaskForDetail)}
         onClose={() => setSelectedTaskForDetail(null)}
         currentUser={currentUser}
-        onUpdateTask={(updatedTask) => {
-          handleUpdateTask(updatedTask);
-          setSelectedTaskForDetail(updatedTask);
+        onUpdateTask={async (updatedTask) => {
+          await handleUpdateTask(updatedTask);
         }}
         onTriggerUnauthorized={triggerUnauthorized}
       />
@@ -1028,6 +1194,23 @@ export default function App() {
         }}
         departments={departmentsList}
       />
+
+      {/* Database Error Feedback Toast Banner */}
+      {dbErrorToast && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-md bg-rose-900/95 text-white p-4 rounded-2xl shadow-2xl border border-rose-700/50 backdrop-blur-md flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 text-rose-300 shrink-0 mt-0.5" />
+          <div className="flex-1 text-xs">
+            <h5 className="font-bold text-rose-100 text-sm">{dbErrorToast.title}</h5>
+            <p className="mt-1 text-rose-200 leading-relaxed">{dbErrorToast.description}</p>
+          </div>
+          <button
+            onClick={() => setDbErrorToast(null)}
+            className="text-rose-300 hover:text-white p-1 rounded-lg cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

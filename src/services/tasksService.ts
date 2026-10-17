@@ -37,11 +37,29 @@ export interface ReviewSubmissionParams {
   review_comment?: string;
 }
 
+function normalizeDeadline(val?: string): string {
+  if (!val) {
+    const d = new Date();
+    d.setDate(d.getDate() + 7);
+    return d.toISOString().split('T')[0];
+  }
+  const parsed = new Date(val);
+  if (!isNaN(parsed.getTime())) {
+    return parsed.toISOString().split('T')[0];
+  }
+  const d = new Date();
+  d.setDate(d.getDate() + 7);
+  return d.toISOString().split('T')[0];
+}
+
 export const tasksService = {
   /**
-   * Fetch all tasks accessible to the current user (filtered by RLS)
+   * Fetch all tasks accessible to the current user (filtered by RLS) along with submissions
    */
-  async getTasks(departmentId?: string): Promise<{ data: TaskRow[] | null; error: Error | null }> {
+  async getTasks(departmentId?: string): Promise<{
+    data: (TaskRow & { submission?: TaskSubmissionRow | null })[] | null;
+    error: Error | null;
+  }> {
     if (!supabase) {
       return { data: null, error: new Error('Supabase client is not configured (Demo Mode)') };
     }
@@ -51,8 +69,29 @@ export const tasksService = {
       if (departmentId) {
         query = query.eq('department_id', departmentId);
       }
-      const { data, error } = await query;
-      return { data, error };
+      const { data: tasksData, error: tasksError } = await query;
+      if (tasksError) return { data: null, error: tasksError };
+      if (!tasksData) return { data: [], error: null };
+
+      // Load submissions for these tasks
+      const taskIds = tasksData.map((t) => t.id);
+      const submissionsMap = new Map<string, TaskSubmissionRow>();
+      if (taskIds.length > 0) {
+        const { data: subsData, error: subsError } = await supabase
+          .from('task_submissions')
+          .select('*')
+          .in('task_id', taskIds);
+        if (subsData && !subsError) {
+          subsData.forEach((sub) => submissionsMap.set(sub.task_id, sub));
+        }
+      }
+
+      const tasksWithSubs = tasksData.map((t) => ({
+        ...t,
+        submission: submissionsMap.get(t.id) || null,
+      }));
+
+      return { data: tasksWithSubs, error: null };
     } catch (err) {
       return { data: null, error: err as Error };
     }
@@ -104,6 +143,8 @@ export const tasksService = {
     }
 
     try {
+      const deadlineDate = normalizeDeadline(params.deadline);
+
       const { data, error } = await supabase
         .from('tasks')
         .insert({
@@ -112,7 +153,7 @@ export const tasksService = {
           department_id: params.department_id,
           assigned_by: params.assigned_by,
           assigned_to: params.assigned_to,
-          deadline: params.deadline,
+          deadline: deadlineDate,
           priority: params.priority ?? 'Medium',
           status: params.status ?? 'Pending',
         })
@@ -120,13 +161,18 @@ export const tasksService = {
         .single();
 
       if (data && !error) {
-        // Record creation activity log
-        await supabase.from('task_activity_logs').insert({
-          task_id: data.id,
-          actor_id: params.assigned_by,
-          action: 'Task created',
-          note: `Priority: ${params.priority ?? 'Medium'}`,
-        });
+        // Record creation activity log safely
+        try {
+          await supabase.from('task_activity_logs').insert({
+            task_id: data.id,
+            actor_id: params.assigned_by,
+            action: 'Task created',
+            details: `Priority: ${params.priority ?? 'Medium'}`,
+            note: `Priority: ${params.priority ?? 'Medium'}`,
+          } as any);
+        } catch {
+          // Non-blocking log insert
+        }
       }
 
       return { data, error };
@@ -157,12 +203,17 @@ export const tasksService = {
         .single();
 
       if (data && !error) {
-        await supabase.from('task_activity_logs').insert({
-          task_id: taskId,
-          actor_id: actorId,
-          action: `Status changed to ${status}`,
-          note: note ?? null,
-        });
+        try {
+          await supabase.from('task_activity_logs').insert({
+            task_id: taskId,
+            actor_id: actorId,
+            action: `Status changed to ${status}`,
+            details: note ?? `Status transitioned to ${status}`,
+            note: note ?? `Status transitioned to ${status}`,
+          } as any);
+        } catch {
+          // Non-blocking log insert
+        }
       }
 
       return { data, error };
@@ -180,37 +231,80 @@ export const tasksService = {
     }
 
     try {
-      // Upsert submission record
-      const { data, error } = await supabase
+      const nowIso = new Date().toISOString();
+      const submissionLink =
+        params.submission_link && params.submission_link.trim().length > 0
+          ? params.submission_link.trim()
+          : 'https://github.com/deliverables/task-' + params.task_id;
+      const submissionNotes = params.submission_notes ?? 'Work submitted for review';
+
+      // Check if submission already exists for this task
+      const { data: existingSub } = await supabase
         .from('task_submissions')
-        .upsert(
-          {
+        .select('id')
+        .eq('task_id', params.task_id)
+        .maybeSingle();
+
+      let subResult;
+      if (existingSub) {
+        subResult = await supabase
+          .from('task_submissions')
+          .update({
+            submitted_by: params.submitted_by,
+            submitted_at: nowIso,
+            submission_link: submissionLink,
+            submission_notes: submissionNotes,
+            review_status: 'Pending',
+            reviewed_by: null,
+            reviewed_at: null,
+            review_comment: null,
+          })
+          .eq('id', existingSub.id)
+          .select()
+          .single();
+      } else {
+        subResult = await supabase
+          .from('task_submissions')
+          .insert({
             task_id: params.task_id,
             submitted_by: params.submitted_by,
-            submitted_at: new Date().toISOString(),
-            submission_link: params.submission_link ?? null,
-            submission_notes: params.submission_notes ?? null,
+            submitted_at: nowIso,
+            submission_link: submissionLink,
+            submission_notes: submissionNotes,
             review_status: 'Pending',
-          },
-          { onConflict: 'task_id' }
-        )
-        .select()
-        .single();
+          })
+          .select()
+          .single();
+      }
 
-      if (data && !error) {
-        // Update task status to Submitted
-        await supabase.from('tasks').update({ status: 'Submitted' }).eq('id', params.task_id);
+      if (subResult.error) {
+        return { data: null, error: subResult.error };
+      }
 
-        // Record submission activity log
+      // Update task status to Submitted
+      const { error: taskError } = await supabase
+        .from('tasks')
+        .update({ status: 'Submitted' })
+        .eq('id', params.task_id);
+
+      if (taskError) {
+        return { data: null, error: taskError };
+      }
+
+      // Record submission activity log
+      try {
         await supabase.from('task_activity_logs').insert({
           task_id: params.task_id,
           actor_id: params.submitted_by,
           action: 'Deliverable submitted',
-          note: params.submission_notes ?? 'Work submitted for review',
-        });
+          details: submissionNotes,
+          note: submissionNotes,
+        } as any);
+      } catch {
+        // Non-blocking log insert
       }
 
-      return { data, error };
+      return { data: subResult.data, error: null };
     } catch (err) {
       return { data: null, error: err as Error };
     }
@@ -225,31 +319,74 @@ export const tasksService = {
     }
 
     try {
-      const { data, error } = await supabase
+      const nowIso = new Date().toISOString();
+      const reviewComment =
+        params.review_comment ?? (params.review_status === 'Approved' ? 'Deliverable approved.' : 'Revisions requested.');
+
+      // Check if submission exists
+      const { data: existingSub } = await supabase
         .from('task_submissions')
-        .update({
-          review_status: params.review_status,
-          reviewed_by: params.reviewed_by,
-          review_comment: params.review_comment ?? null,
-          reviewed_at: new Date().toISOString(),
-        })
+        .select('id')
         .eq('task_id', params.task_id)
-        .select()
-        .single();
+        .maybeSingle();
 
-      if (data && !error) {
-        const nextStatus: TaskStatus = params.review_status === 'Approved' ? 'Approved' : 'Rejected';
-        await supabase.from('tasks').update({ status: nextStatus }).eq('id', params.task_id);
+      let subResult;
+      if (existingSub) {
+        subResult = await supabase
+          .from('task_submissions')
+          .update({
+            review_status: params.review_status,
+            reviewed_by: params.reviewed_by,
+            review_comment: reviewComment,
+            reviewed_at: nowIso,
+          })
+          .eq('id', existingSub.id)
+          .select()
+          .single();
+      } else {
+        subResult = await supabase
+          .from('task_submissions')
+          .insert({
+            task_id: params.task_id,
+            submitted_by: params.reviewed_by,
+            submission_link: 'https://github.com/deliverables/task-' + params.task_id,
+            submission_notes: 'Reviewed directly by leadership',
+            review_status: params.review_status,
+            reviewed_by: params.reviewed_by,
+            review_comment: reviewComment,
+            reviewed_at: nowIso,
+          })
+          .select()
+          .single();
+      }
 
+      if (subResult.error) {
+        return { data: null, error: subResult.error };
+      }
+
+      const nextStatus: TaskStatus = params.review_status === 'Approved' ? 'Approved' : 'Rejected';
+      const { error: taskError } = await supabase
+        .from('tasks')
+        .update({ status: nextStatus })
+        .eq('id', params.task_id);
+
+      if (taskError) {
+        return { data: null, error: taskError };
+      }
+
+      try {
         await supabase.from('task_activity_logs').insert({
           task_id: params.task_id,
           actor_id: params.reviewed_by,
           action: `Review: ${params.review_status}`,
-          note: params.review_comment ?? null,
-        });
+          details: reviewComment,
+          note: reviewComment,
+        } as any);
+      } catch {
+        // Non-blocking log insert
       }
 
-      return { data, error };
+      return { data: subResult.data, error: null };
     } catch (err) {
       return { data: null, error: err as Error };
     }

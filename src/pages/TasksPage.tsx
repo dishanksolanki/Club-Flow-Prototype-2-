@@ -23,8 +23,8 @@ import { Lock, ShieldCheck } from 'lucide-react';
 
 interface TasksPageProps {
   tasks: Task[];
-  onUpdateTaskStatus: (taskId: string, newStatus: TaskStatus) => void;
-  onUpdateTask: (updatedTask: Task) => void;
+  onUpdateTaskStatus: (taskId: string, newStatus: TaskStatus) => void | Promise<void>;
+  onUpdateTask: (updatedTask: Task) => void | Promise<void>;
   onOpenCreateTask: () => void;
   departments: DepartmentType[];
   members: Member[];
@@ -126,10 +126,20 @@ export const TasksPage: React.FC<TasksPageProps> = ({
     setSelectedTask(task);
   };
 
-  const handleTaskModalUpdate = (updatedTask: Task) => {
-    onUpdateTask(updatedTask);
+  const handleTaskModalUpdate = async (updatedTask: Task) => {
     setSelectedTask(updatedTask);
+    await onUpdateTask(updatedTask);
   };
+
+  // Sync selectedTask when tasks prop changes (rollback or external update)
+  React.useEffect(() => {
+    if (selectedTask) {
+      const match = tasks.find((t) => t.id === selectedTask.id);
+      if (match) {
+        setSelectedTask(match);
+      }
+    }
+  }, [tasks]);
 
   // Metric counts
   const inProgressCount = tasks.filter((t) => t.status === 'In Progress').length;

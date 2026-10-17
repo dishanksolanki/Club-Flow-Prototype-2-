@@ -26,7 +26,7 @@ interface TaskDetailModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentUser: Member;
-  onUpdateTask: (updatedTask: Task) => void;
+  onUpdateTask: (updatedTask: Task) => void | Promise<void>;
   onTriggerUnauthorized?: (action: string, reason: string, recommendedRole?: HierarchyRole) => void;
 }
 
@@ -43,8 +43,18 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
   const [submissionLink, setSubmissionLink] = useState(task.submission?.submissionLink || '');
   const [submissionNotes, setSubmissionNotes] = useState(task.submission?.submissionNotes || '');
   const [isSubmittingWork, setIsSubmittingWork] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [reviewComment, setReviewComment] = useState('');
   const [newActivityNote, setNewActivityNote] = useState('');
+
+  // Keep submission form in sync if task data or submission updates
+  React.useEffect(() => {
+    if (task) {
+      setSubmissionLink(task.submission?.submissionLink || '');
+      setSubmissionNotes(task.submission?.submissionNotes || '');
+      setReviewComment(task.submission?.reviewComment || '');
+    }
+  }, [task?.id, task?.status, task?.submission?.submittedAt, task?.submission?.reviewStatus]);
 
   const allStatuses: TaskStatus[] = [
     'Pending',
@@ -74,7 +84,7 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
     onUpdateTask(updated);
   };
 
-  const handleSubmitDeliverable = (e: React.FormEvent) => {
+  const handleSubmitDeliverable = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!submissionNotes.trim() && !submissionLink.trim()) return;
 
@@ -99,11 +109,16 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
       history: [...(task.history || []), newEvent],
     };
 
-    onUpdateTask(updated);
-    setIsSubmittingWork(false);
+    try {
+      setIsSaving(true);
+      await onUpdateTask(updated);
+      setIsSubmittingWork(false);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handleReviewAction = (decision: 'Approved' | 'Rejected') => {
+  const handleReviewAction = async (decision: 'Approved' | 'Rejected') => {
     const newEvent: TaskActivityEvent = {
       id: `act-${Date.now()}`,
       action: decision === 'Approved' ? 'Reviewed and Approved' : 'Reviewed and Rejected',
@@ -121,12 +136,22 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
             reviewStatus: decision,
             reviewComment: reviewComment.trim() || undefined,
           }
-        : undefined,
+        : {
+            submittedAt: 'Just now',
+            submittedBy: task.assignedTo,
+            reviewStatus: decision,
+            reviewComment: reviewComment.trim() || undefined,
+          },
       history: [...(task.history || []), newEvent],
     };
 
-    onUpdateTask(updated);
-    setReviewComment('');
+    try {
+      setIsSaving(true);
+      await onUpdateTask(updated);
+      setReviewComment('');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleStartWork = () => {
@@ -315,20 +340,26 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
                 <>
                   <button
                     type="button"
+                    disabled={isSaving}
                     onClick={() => handleReviewAction('Approved')}
-                    className="px-3.5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                    className={`px-3.5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-all flex items-center gap-1.5 shadow-xs ${
+                      isSaving ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
+                    }`}
                   >
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Approve Submission</span>
+                    <span>{isSaving ? 'Approving...' : 'Approve Submission'}</span>
                   </button>
 
                   <button
                     type="button"
+                    disabled={isSaving}
                     onClick={() => handleReviewAction('Rejected')}
-                    className="px-3.5 py-2 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                    className={`px-3.5 py-2 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition-all flex items-center gap-1.5 ${
+                      isSaving ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
+                    }`}
                   >
                     <XCircle className="w-3.5 h-3.5" />
-                    <span>Reject & Request Changes</span>
+                    <span>{isSaving ? 'Rejecting...' : 'Reject & Request Changes'}</span>
                   </button>
                 </>
               );
@@ -428,6 +459,7 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
               <div className="flex items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
+                  disabled={isSaving}
                   onClick={() => setIsSubmittingWork(false)}
                   className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-800 rounded-xl"
                 >
@@ -435,9 +467,12 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl transition-all shadow-xs"
+                  disabled={isSaving}
+                  className={`px-3.5 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl transition-all shadow-xs ${
+                    isSaving ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
+                  }`}
                 >
-                  Confirm & Submit
+                  {isSaving ? 'Submitting...' : 'Confirm & Submit'}
                 </button>
               </div>
             </form>
