@@ -53,13 +53,18 @@ export const workingHoursService = {
     }
 
     try {
+      const logDate =
+        params.log_date && !isNaN(new Date(params.log_date).getTime())
+          ? new Date(params.log_date).toISOString().split('T')[0]
+          : new Date().toISOString().split('T')[0];
+
       const { data, error } = await supabase
         .from('working_hours')
         .insert({
           member_id: params.member_id,
           department_id: params.department_id,
           project: params.project,
-          log_date: params.log_date ?? new Date().toISOString().split('T')[0],
+          log_date: logDate,
           start_time: params.start_time ?? null,
           end_time: params.end_time ?? null,
           description: params.description ?? '',

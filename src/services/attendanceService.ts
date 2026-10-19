@@ -58,12 +58,18 @@ export const attendanceService = {
     }
 
     try {
+      const recDate =
+        params.record_date && !isNaN(new Date(params.record_date).getTime())
+          ? new Date(params.record_date).toISOString().split('T')[0]
+          : new Date().toISOString().split('T')[0];
+
       const { data, error } = await supabase
         .from('attendance_records')
         .insert({
           event_id: params.event_id ?? null,
           event_name: params.event_name,
-          record_date: params.record_date ?? new Date().toISOString().split('T')[0],
+          record_date: recDate,
+          event_date: recDate,
           member_id: params.member_id,
           department_id: params.department_id,
           check_in_time: params.check_in_time ?? '—',
@@ -72,7 +78,7 @@ export const attendanceService = {
           session_type: params.session_type ?? 'General Meeting',
           duration_hours: params.duration_hours ?? null,
           notes: params.notes ?? null,
-        })
+        } as any)
         .select()
         .single();
 

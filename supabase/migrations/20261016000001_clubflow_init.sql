@@ -110,6 +110,15 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$ BEGIN
+  CREATE TYPE announcement_priority AS ENUM (
+    'Normal',
+    'Important',
+    'Urgent'
+  );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
   CREATE TYPE notification_type AS ENUM (
     'Task Assigned',
     'Task Approved',

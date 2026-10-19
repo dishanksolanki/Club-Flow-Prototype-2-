@@ -159,6 +159,13 @@ ALTER TABLE IF EXISTS public.task_submissions
   ADD COLUMN IF NOT EXISTS review_comment TEXT,
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_task_unique ON public.task_submissions(task_id);
+
+-- 3.5b. Task Activity Logs
+ALTER TABLE IF EXISTS public.task_activity_logs
+  ADD COLUMN IF NOT EXISTS details TEXT,
+  ADD COLUMN IF NOT EXISTS note TEXT;
+
 -- 3.6. Events
 ALTER TABLE IF EXISTS public.events
   ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '',

@@ -32,6 +32,21 @@ export interface UpdateEventParams {
   tags?: string[];
 }
 
+function normalizeDate(val?: string): string {
+  if (!val) {
+    const d = new Date();
+    d.setDate(d.getDate() + 14);
+    return d.toISOString().split('T')[0];
+  }
+  const parsed = new Date(val);
+  if (!isNaN(parsed.getTime())) {
+    return parsed.toISOString().split('T')[0];
+  }
+  const d = new Date();
+  d.setDate(d.getDate() + 14);
+  return d.toISOString().split('T')[0];
+}
+
 export const eventsService = {
   /**
    * Fetch all scheduled club events
@@ -81,15 +96,19 @@ export const eventsService = {
     }
 
     try {
+      const normalizedDate = normalizeDate(params.event_date);
       const { data, error } = await supabase
         .from('events')
         .insert({
           title: params.title,
           description: params.description ?? '',
-          event_date: params.event_date,
+          event_date: normalizedDate,
+          date: normalizedDate,
           start_time: params.start_time,
           end_time: params.end_time,
+          time: `${params.start_time} - ${params.end_time}`,
           venue: params.venue,
+          location: params.venue,
           organizer_id: params.organizer_id,
           department_id: params.department_id,
           status: params.status ?? 'Upcoming',

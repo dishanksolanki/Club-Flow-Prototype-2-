@@ -341,6 +341,7 @@ export interface Database {
           actor_id: string;
           action: string;
           note: string | null;
+          details?: string | null;
           created_at: string;
         };
         Insert: {
@@ -349,6 +350,7 @@ export interface Database {
           actor_id: string;
           action: string;
           note?: string | null;
+          details?: string | null;
           created_at?: string;
         };
         Update: {
@@ -357,6 +359,7 @@ export interface Database {
           actor_id?: string;
           action?: string;
           note?: string | null;
+          details?: string | null;
           created_at?: string;
         };
         Relationships: [
@@ -381,9 +384,13 @@ export interface Database {
           title: string;
           description: string;
           event_date: string;
+          date?: string;
           start_time: string;
           end_time: string;
+          time?: string;
           venue: string;
+          location?: string;
+          type?: string;
           organizer_id: string;
           department_id: string;
           status: EventStatus;
@@ -397,9 +404,13 @@ export interface Database {
           title: string;
           description?: string;
           event_date: string;
+          date?: string;
           start_time: string;
           end_time: string;
+          time?: string;
           venue: string;
+          location?: string;
+          type?: string;
           organizer_id: string;
           department_id: string;
           status?: EventStatus;
@@ -413,9 +424,13 @@ export interface Database {
           title?: string;
           description?: string;
           event_date?: string;
+          date?: string;
           start_time?: string;
           end_time?: string;
+          time?: string;
           venue?: string;
+          location?: string;
+          type?: string;
           organizer_id?: string;
           department_id?: string;
           status?: EventStatus;

@@ -41,21 +41,31 @@ export const clubSettingsService = {
    * Update club settings (requires Executive authority via RLS)
    */
   async updateSettings(
-    id: string,
-    updates: UpdateClubSettingsParams
+    updates: UpdateClubSettingsParams,
+    id?: string
   ): Promise<{ data: ClubSettingsRow | null; error: Error | null }> {
     if (!supabase) {
       return { data: null, error: new Error('Supabase client is not configured (Demo Mode)') };
     }
 
     try {
+      let targetId = id;
+      if (!targetId) {
+        const { data: firstRow } = await supabase.from('club_settings').select('id').limit(1).maybeSingle();
+        targetId = firstRow?.id;
+      }
+
+      if (!targetId) {
+        return { data: null, error: new Error('No club settings record found to update') };
+      }
+
       const { data, error } = await supabase
         .from('club_settings')
         .update({
           ...updates,
           updated_at: new Date().toISOString(),
         })
-        .eq('id', id)
+        .eq('id', targetId)
         .select()
         .single();
 

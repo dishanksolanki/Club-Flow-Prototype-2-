@@ -199,15 +199,26 @@ export default function App() {
         clubSettingsService.getSettings(),
       ]);
 
+      const isSchemaUninitialized =
+        deptRes.error?.message?.includes('schema cache') ||
+        deptRes.error?.message?.includes('does not exist');
+
+      if (isSchemaUninitialized) {
+        console.info(
+          '[ClubFlow] Supabase backend connected, but database tables are not initialized yet. Running in Demo Mode.'
+        );
+        return;
+      }
+
       const rawDepts = deptRes.data || [];
       const rawProfs = profRes.data || [];
 
-      if (rawDepts.length > 0) {
+      if (deptRes.data) {
         const mappedDepts = rawDepts.map((d) => mapDepartmentToInfo(d, rawProfs));
         setDepartments(mappedDepts);
       }
 
-      if (rawProfs.length > 0) {
+      if (profRes.data) {
         const mappedMembers = rawProfs.map((p) => mapProfileToMember(p, departments));
         setMembers(mappedMembers);
 
@@ -235,19 +246,19 @@ export default function App() {
         announcementsService.getAnnouncements(),
       ]);
 
-      if (taskRes.data && taskRes.data.length > 0) {
+      if (taskRes.data) {
         setTasks(taskRes.data.map((t) => mapTaskToModel(t, rawProfs, rawDepts, (t as any).submission)));
       }
-      if (eventRes.data && eventRes.data.length > 0) {
+      if (eventRes.data) {
         setEvents(eventRes.data.map((e) => mapEventToModel(e, rawProfs, rawDepts)));
       }
-      if (attRes.data && attRes.data.length > 0) {
+      if (attRes.data) {
         setAttendanceRecords(attRes.data.map((a) => mapAttendanceToModel(a, rawProfs, rawDepts)));
       }
-      if (hourRes.data && hourRes.data.length > 0) {
+      if (hourRes.data) {
         setWorkingHours(hourRes.data.map((h) => mapWorkingHourToModel(h, rawProfs, rawDepts)));
       }
-      if (annRes.data && annRes.data.length > 0) {
+      if (annRes.data) {
         setAnnouncements(annRes.data.map((a) => mapAnnouncementToModel(a, rawProfs, rawDepts)));
       }
 
@@ -255,7 +266,7 @@ export default function App() {
       const { data: sessionData } = await supabase.auth.getSession();
       if (sessionData?.session?.user) {
         const notifRes = await notificationsService.getNotifications(sessionData.session.user.id);
-        if (notifRes.data && notifRes.data.length > 0) {
+        if (notifRes.data) {
           setNotifications(notifRes.data.map(mapNotificationToModel));
         }
       }
@@ -599,7 +610,8 @@ export default function App() {
     }
   };
 
-  const handleLogHours = (record: WorkingHourRecord) => {
+  const handleLogHours = async (record: WorkingHourRecord) => {
+    // Optimistic UI update
     setWorkingHours((prev) => [record, ...prev]);
     recordActivity('Work record added', record.member, `${record.project} (${record.hours}h)`, 'hours');
     // update member working hours in members list
@@ -621,15 +633,59 @@ export default function App() {
         workingHours: parseFloat((prev.workingHours + record.hours).toFixed(1)),
       }));
     }
+
+    // Persist to Supabase if configured & authenticated
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const member = members.find((m) => m.name.toLowerCase() === record.member.toLowerCase() || m.id === record.id);
+      const dept = departments.find((d) => d.name === record.department);
+      const { data: sessionData } = await supabase.auth.getSession();
+      const memberId = sessionData?.session?.user?.id || member?.id || currentUser.id;
+      const deptId = dept?.id;
+
+      if (!deptId) return;
+
+      const { data, error } = await workingHoursService.logHours({
+        member_id: memberId,
+        department_id: deptId,
+        project: record.project,
+        log_date: record.date,
+        start_time: record.startTime,
+        end_time: record.endTime,
+        description: record.description,
+        hours: record.hours,
+      });
+
+      if (error) {
+        // Roll back failed optimistic update
+        setWorkingHours((prev) => prev.filter((r) => r.id !== record.id));
+        setMembers((prev) =>
+          prev.map((m) => {
+            if (m.name.toLowerCase() === record.member.toLowerCase()) {
+              return {
+                ...m,
+                workingHours: parseFloat(Math.max(0, m.workingHours - record.hours).toFixed(1)),
+              };
+            }
+            return m;
+          })
+        );
+        showDatabaseErrorToast('Failed to save working hours log in Supabase', error.message);
+      } else if (data) {
+        setWorkingHours((prev) =>
+          prev.map((r) => (r.id === record.id ? { ...r, id: data.id } : r))
+        );
+      }
+    }
   };
 
-  const handleUpdateWorkingHourStatus = (recordId: string, status: 'Verified' | 'Pending Verification') => {
+  const handleUpdateWorkingHourStatus = async (recordId: string, status: 'Verified' | 'Pending Verification') => {
     const targetRecord = workingHours.find((r) => r.id === recordId);
     const perm = canUserVerifyHours(currentUser, targetRecord);
     if (!perm.allowed) {
       triggerUnauthorized('Verify Working Hours', perm.reason, 'Department Head');
       return;
     }
+    const prevRecord = targetRecord;
     setWorkingHours((prev) =>
       prev.map((r) => {
         if (r.id === recordId) {
@@ -641,15 +697,30 @@ export default function App() {
         return r;
       })
     );
+
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const verifiedById = sessionData?.session?.user?.id || currentUser.id;
+      const { error } = await workingHoursService.verifyHours(recordId, status, verifiedById);
+      if (error) {
+        if (prevRecord) {
+          setWorkingHours((prev) => prev.map((r) => (r.id === recordId ? prevRecord : r)));
+        }
+        showDatabaseErrorToast('Failed to update working hours status in Supabase', error.message);
+      }
+    }
   };
 
-  const handleUpdateAttendanceStatus = (recordId: string, newStatus: AttendanceStatus) => {
+  const handleUpdateAttendanceStatus = async (recordId: string, newStatus: AttendanceStatus) => {
     const perm = canUserManageAttendance(currentUser);
     if (!perm.allowed) {
       triggerUnauthorized('Mark Attendance Status', perm.reason, 'Department Head');
       return;
     }
     const targetRecord = attendanceRecords.find((r) => r.id === recordId);
+    if (!targetRecord) return;
+    const prevRecord = targetRecord;
+
     const updatedList = attendanceRecords.map((r) => {
       if (r.id === recordId) {
         recordActivity('Attendance marked', currentUser.name, `${r.member} marked ${newStatus} for ${r.eventName}`, 'attendance');
@@ -658,12 +729,19 @@ export default function App() {
       return r;
     });
     setAttendanceRecords(updatedList);
-    if (targetRecord) {
-      syncMemberAttendanceRate(targetRecord.member, updatedList);
+    syncMemberAttendanceRate(targetRecord.member, updatedList);
+
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const { error } = await attendanceService.updateAttendanceStatus(recordId, newStatus);
+      if (error) {
+        setAttendanceRecords((prev) => prev.map((r) => (r.id === recordId ? prevRecord : r)));
+        syncMemberAttendanceRate(targetRecord.member, attendanceRecords);
+        showDatabaseErrorToast('Failed to update attendance status in Supabase', error.message);
+      }
     }
   };
 
-  const handleAddAttendanceRecord = (newRecord: AttendanceRecord) => {
+  const handleAddAttendanceRecord = async (newRecord: AttendanceRecord) => {
     const perm = canUserManageAttendance(currentUser);
     if (!perm.allowed) {
       triggerUnauthorized('Mark Attendance Record', perm.reason, 'Department Head');
@@ -673,6 +751,39 @@ export default function App() {
     setAttendanceRecords(updatedList);
     recordActivity('Attendance marked', currentUser.name, `${newRecord.member} marked ${newRecord.status} for ${newRecord.eventName}`, 'attendance');
     syncMemberAttendanceRate(newRecord.member, updatedList);
+
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const member = members.find((m) => m.name.toLowerCase() === newRecord.member.toLowerCase());
+      const dept = departments.find((d) => d.name === newRecord.department);
+      const ev = events.find((e) => e.title.toLowerCase() === newRecord.eventName.toLowerCase() || e.id === newRecord.eventId);
+      const { data: sessionData } = await supabase.auth.getSession();
+      const recordedBy = sessionData?.session?.user?.id || currentUser.id;
+
+      if (!member || !dept) return;
+
+      const { data, error } = await attendanceService.addAttendanceRecord({
+        event_id: ev?.id || newRecord.eventId || null,
+        event_name: newRecord.eventName,
+        record_date: newRecord.date,
+        member_id: member.id,
+        department_id: dept.id,
+        check_in_time: newRecord.checkInTime,
+        status: newRecord.status,
+        recorded_by: recordedBy,
+        session_type: newRecord.type || 'General Meeting',
+        duration_hours: newRecord.durationHours,
+        notes: newRecord.notes,
+      });
+
+      if (error) {
+        setAttendanceRecords((prev) => prev.filter((r) => r.id !== newRecord.id));
+        showDatabaseErrorToast('Failed to save attendance record in Supabase', error.message);
+      } else if (data) {
+        setAttendanceRecords((prev) =>
+          prev.map((r) => (r.id === newRecord.id ? { ...r, id: data.id } : r))
+        );
+      }
+    }
   };
 
   const handleRequestCreateTask = () => {
@@ -713,12 +824,29 @@ export default function App() {
     recordActivity('Member onboarded', currentUser.name, `${newMember.name} (${newMember.role})`, 'event');
   };
 
-  const handleUpdateClubSettings = (newSettings: ClubSettings) => {
+  const handleUpdateClubSettings = async (newSettings: ClubSettings) => {
+    const prevSettings = clubSettings;
     setClubSettings(newSettings);
     recordActivity('Club settings updated', currentUser.name, newSettings.name, 'event');
+
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const { error } = await clubSettingsService.updateSettings({
+        name: newSettings.name,
+        description: newSettings.description,
+        academic_year: newSettings.academicYear,
+        contact_email: newSettings.contactEmail,
+        brand_tag: newSettings.brandTag,
+      });
+
+      if (error) {
+        setClubSettings(prevSettings);
+        showDatabaseErrorToast('Failed to save club settings in Supabase', error.message);
+      }
+    }
   };
 
-  const handleUpdateMember = (updatedMember: Member) => {
+  const handleUpdateMember = async (updatedMember: Member) => {
+    const prevMember = members.find((m) => m.id === updatedMember.id);
     setMembers((prev) =>
       prev.map((m) => (m.id === updatedMember.id ? updatedMember : m))
     );
@@ -726,6 +854,38 @@ export default function App() {
       setCurrentUser(updatedMember);
     }
     recordActivity('Member credentials updated', currentUser.name, `${updatedMember.name} (${updatedMember.hierarchyRole})`, 'event');
+
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const dept = departments.find((d) => d.name === updatedMember.department);
+      const { error } = await profilesService.updateProfile(updatedMember.id, {
+        name: updatedMember.name,
+        initials: updatedMember.initials,
+        role: updatedMember.role,
+        department_id: dept?.id || null,
+        student_id: updatedMember.studentId,
+        year: updatedMember.year,
+        bio: updatedMember.bio,
+        status: updatedMember.status,
+      });
+
+      if (error) {
+        if (prevMember) {
+          setMembers((prev) => prev.map((m) => (m.id === updatedMember.id ? prevMember : m)));
+          if (currentUser.id === updatedMember.id) {
+            setCurrentUser(prevMember);
+          }
+        }
+        showDatabaseErrorToast('Failed to update member in Supabase', error.message);
+      } else if (prevMember && prevMember.hierarchyRole !== updatedMember.hierarchyRole) {
+        const { error: roleError } = await profilesService.updateMemberHierarchyRole(
+          updatedMember.id,
+          updatedMember.hierarchyRole
+        );
+        if (roleError) {
+          showDatabaseErrorToast('Failed to update hierarchy role in Supabase', roleError.message);
+        }
+      }
+    }
   };
 
   const handleAddDepartment = (newDept: DepartmentInfo) => {
@@ -740,7 +900,7 @@ export default function App() {
     recordActivity('Department updated', currentUser.name, updatedDept.name, 'event');
   };
 
-  const handleAddAnnouncement = (newAnnouncement: Announcement) => {
+  const handleAddAnnouncement = async (newAnnouncement: Announcement) => {
     setAnnouncements((prev) => [newAnnouncement, ...prev]);
     recordActivity('Announcement posted', currentUser.name, newAnnouncement.title, 'event');
     const notif: ClubNotification = {
@@ -754,6 +914,33 @@ export default function App() {
       itemId: newAnnouncement.id,
     };
     setNotifications((prev) => [notif, ...prev]);
+
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const posterId = sessionData?.session?.user?.id || currentUser.id;
+      const targetDept = newAnnouncement.targetDepartment
+        ? departments.find((d) => d.name === newAnnouncement.targetDepartment)?.id
+        : null;
+
+      const { data, error } = await announcementsService.createAnnouncement({
+        title: newAnnouncement.title,
+        content: newAnnouncement.content || newAnnouncement.message || '',
+        posted_by: posterId,
+        audience: newAnnouncement.audience || 'All Members',
+        target_department_id: targetDept,
+        priority: newAnnouncement.priority,
+        pinned: newAnnouncement.pinned ?? false,
+      });
+
+      if (error) {
+        setAnnouncements((prev) => prev.filter((a) => a.id !== newAnnouncement.id));
+        showDatabaseErrorToast('Failed to post announcement to Supabase', error.message);
+      } else if (data) {
+        setAnnouncements((prev) =>
+          prev.map((a) => (a.id === newAnnouncement.id ? { ...a, id: data.id } : a))
+        );
+      }
+    }
   };
 
   const handleNotificationClick = (notif: ClubNotification) => {
@@ -774,7 +961,7 @@ export default function App() {
     }
   };
 
-  const handleAddEvent = (newEvent: ClubEvent) => {
+  const handleAddEvent = async (newEvent: ClubEvent) => {
     setEvents((prev) => [newEvent, ...prev]);
     recordActivity('Event created', currentUser.name, newEvent.title, 'event');
     const notif: ClubNotification = {
@@ -788,14 +975,71 @@ export default function App() {
       itemId: newEvent.id,
     };
     setNotifications((prev) => [notif, ...prev]);
+
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const dept = departments.find((d) => d.name === newEvent.department);
+      const organizer = members.find((m) => m.name.toLowerCase() === newEvent.organizer.toLowerCase());
+      const { data: sessionData } = await supabase.auth.getSession();
+      const organizerId = organizer?.id || sessionData?.session?.user?.id || currentUser.id;
+
+      if (!dept) return;
+
+      const { data, error } = await eventsService.createEvent({
+        title: newEvent.title,
+        description: newEvent.description,
+        event_date: newEvent.date,
+        start_time: newEvent.startTime,
+        end_time: newEvent.endTime,
+        venue: newEvent.venue,
+        organizer_id: organizerId,
+        department_id: dept.id,
+        status: newEvent.status,
+        capacity: newEvent.capacity,
+        tags: newEvent.tags,
+      });
+
+      if (error) {
+        setEvents((prev) => prev.filter((e) => e.id !== newEvent.id));
+        showDatabaseErrorToast('Failed to schedule event in Supabase', error.message);
+      } else if (data) {
+        setEvents((prev) =>
+          prev.map((e) => (e.id === newEvent.id ? { ...e, id: data.id } : e))
+        );
+      }
+    }
   };
 
-  const handleUpdateEvent = (updatedEvent: ClubEvent) => {
+  const handleUpdateEvent = async (updatedEvent: ClubEvent) => {
+    const prevEvent = events.find((e) => e.id === updatedEvent.id);
     setEvents((prev) =>
       prev.map((e) => (e.id === updatedEvent.id ? updatedEvent : e))
     );
     if (selectedEventForDetail?.id === updatedEvent.id) {
       setSelectedEventForDetail(updatedEvent);
+    }
+
+    if (isConfigured && isSupabaseAuth && supabase) {
+      const { error } = await eventsService.updateEvent(updatedEvent.id, {
+        title: updatedEvent.title,
+        description: updatedEvent.description,
+        event_date: updatedEvent.date,
+        start_time: updatedEvent.startTime,
+        end_time: updatedEvent.endTime,
+        venue: updatedEvent.venue,
+        status: updatedEvent.status,
+        capacity: updatedEvent.capacity,
+        tags: updatedEvent.tags,
+      });
+
+      if (error) {
+        if (prevEvent) {
+          setEvents((prev) => prev.map((e) => (e.id === updatedEvent.id ? prevEvent : e)));
+          if (selectedEventForDetail?.id === updatedEvent.id) {
+            setSelectedEventForDetail(prevEvent);
+          }
+        }
+        showDatabaseErrorToast('Failed to update event in Supabase', error.message);
+      }
     }
   };
 
@@ -803,10 +1047,16 @@ export default function App() {
     setNotifications((prev) =>
       prev.map((n) => (n.id === id ? { ...n, read: true } : n))
     );
+    if (isConfigured && isSupabaseAuth && supabase) {
+      notificationsService.markAsRead(id);
+    }
   };
 
   const handleClearAllNotifications = () => {
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    if (isConfigured && isSupabaseAuth && supabase && currentUser.id) {
+      notificationsService.markAllAsRead(currentUser.id);
+    }
   };
 
   const handleUpdateCurrentUser = (updated: Partial<Member>) => {
