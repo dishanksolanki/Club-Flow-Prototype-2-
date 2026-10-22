@@ -513,7 +513,65 @@ CREATE TRIGGER tr_announcements_pin_sync
 -- ------------------------------------------------------------------------------
 -- 5. RLS & PRIVILEGE HELPER FUNCTIONS (HARDENED SECURITY DEFINER)
 -- ------------------------------------------------------------------------------
--- 5.1. Strictly identify trusted database administrators or server-side service role context
+-- 5.1. Current user's hierarchy role, department, and executive status.
+-- These helpers must exist before validation functions and RLS policies reference them.
+
+CREATE OR REPLACE FUNCTION public.auth_hierarchy_role()
+RETURNS public.hierarchy_role
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT p.hierarchy_role
+  FROM public.profiles AS p
+  WHERE p.id = auth.uid()
+  LIMIT 1;
+$$;
+
+CREATE OR REPLACE FUNCTION public.auth_department_id()
+RETURNS UUID
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT p.department_id
+  FROM public.profiles AS p
+  WHERE p.id = auth.uid()
+  LIMIT 1;
+$$;
+
+CREATE OR REPLACE FUNCTION public.is_executive()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT COALESCE(
+    public.auth_hierarchy_role() IN (
+      'President'::public.hierarchy_role,
+      'Vice President'::public.hierarchy_role
+    ),
+    FALSE
+  );
+$$;
+
+CREATE OR REPLACE FUNCTION public.is_faculty()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT COALESCE(
+    public.auth_hierarchy_role() = 'Faculty Advisor'::public.hierarchy_role,
+    FALSE
+  );
+$$;
+
+-- 5.2. Strictly identify trusted database administrators or server-side service role context
 -- Includes 'supabase_auth_admin' to ensure GoTrue daemon signup triggers run securely
 
 CREATE OR REPLACE FUNCTION public.is_trusted_admin()
