@@ -513,9 +513,9 @@ CREATE TRIGGER tr_announcements_pin_sync
 -- ------------------------------------------------------------------------------
 -- 5. RLS & PRIVILEGE HELPER FUNCTIONS (HARDENED SECURITY DEFINER)
 -- ------------------------------------------------------------------------------
-
 -- 5.1. Strictly identify trusted database administrators or server-side service role context
 -- Includes 'supabase_auth_admin' to ensure GoTrue daemon signup triggers run securely
+
 CREATE OR REPLACE FUNCTION public.is_trusted_admin()
 RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -525,25 +525,38 @@ AS $$
 DECLARE
   v_jwt_role TEXT;
 BEGIN
-  -- 1. Direct administrative database session (Supabase SQL Editor, psql, migrations, pg_cron, GoTrue auth)
-  IF session_user IN ('postgres', 'supabase_admin', 'supabase_auth_admin') THEN
+  -- 1. Direct administrative database session
+  -- (Supabase SQL Editor, psql, migrations, pg_cron, GoTrue auth)
+  IF session_user IN (
+    'postgres',
+    'supabase_admin',
+    'supabase_auth_admin'
+  ) THEN
     BEGIN
-      v_jwt_role := NULLIF(current_setting('request.jwt.claim.role', true), '');
+      v_jwt_role := NULLIF(
+        current_setting('request.jwt.claim.role', true),
+        ''
+      );
     EXCEPTION WHEN OTHERS THEN
       v_jwt_role := NULL;
-    END IF;
-    -- In direct database sessions, no PostgREST claim is active, or service_role is specified
+    END;
+
+    -- In direct database sessions, no PostgREST claim is active,
+    -- or service_role is specified.
     IF v_jwt_role IS NULL OR v_jwt_role = 'service_role' THEN
       RETURN TRUE;
     END IF;
   END IF;
 
-  -- 2. PostgREST API request with verified service_role key
+  -- 2. PostgREST API request with service_role context
   BEGIN
-    v_jwt_role := NULLIF(current_setting('request.jwt.claim.role', true), '');
+    v_jwt_role := NULLIF(
+      current_setting('request.jwt.claim.role', true),
+      ''
+    );
   EXCEPTION WHEN OTHERS THEN
     v_jwt_role := NULL;
-  END IF;
+  END;
 
   IF v_jwt_role = 'service_role' THEN
     RETURN TRUE;
@@ -552,152 +565,6 @@ BEGIN
   RETURN FALSE;
 END;
 $$;
-
--- 5.2. Retrieve hierarchy role of authenticated user
-CREATE OR REPLACE FUNCTION public.auth_hierarchy_role()
-RETURNS public.hierarchy_role
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $$
-  SELECT hierarchy_role FROM public.profiles WHERE id = auth.uid();
-$$;
-
--- 5.3. Check if authenticated user belongs to executive leadership (Tiers 2-5)
-CREATE OR REPLACE FUNCTION public.is_executive()
-RETURNS BOOLEAN
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $$
-  SELECT COALESCE(
-    (SELECT hierarchy_role IN ('President', 'Vice President', 'Head', 'Co-Head')
-     FROM public.profiles
-     WHERE id = auth.uid()),
-    FALSE
-  );
-$$;
-
--- 5.4. Check if authenticated user is Faculty Advisor (Tier 1: Read-Only Governance)
-CREATE OR REPLACE FUNCTION public.is_faculty()
-RETURNS BOOLEAN
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $$
-  SELECT COALESCE(
-    (SELECT hierarchy_role = 'Faculty Advisor'
-     FROM public.profiles
-     WHERE id = auth.uid()),
-    FALSE
-  );
-$$;
-
--- 5.5. Retrieve department_id of authenticated user
-CREATE OR REPLACE FUNCTION public.auth_department_id()
-RETURNS UUID
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $$
-  SELECT department_id FROM public.profiles WHERE id = auth.uid();
-$$;
-
--- 5.6. Check if authenticated user is Head or Co-Head of a specific department
-CREATE OR REPLACE FUNCTION public.is_department_lead(target_dept_id UUID)
-RETURNS BOOLEAN
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $$
-  SELECT COALESCE(
-    (SELECT (hierarchy_role IN ('Department Head', 'Department Co-Head')) AND (department_id = target_dept_id)
-     FROM public.profiles
-     WHERE id = auth.uid()),
-    FALSE
-  );
-$$;
-
--- 5.7. Secure Notification Dispatch Function (Trusted server-side creation)
-CREATE OR REPLACE FUNCTION public.create_notification(
-  p_recipient_id UUID,
-  p_title TEXT,
-  p_message TEXT,
-  p_type TEXT,
-  p_link_tab TEXT DEFAULT NULL,
-  p_item_id UUID DEFAULT NULL
-)
-RETURNS UUID
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $$
-DECLARE
-  v_new_id UUID;
-  v_caller_id UUID;
-  v_is_exec BOOLEAN;
-  v_caller_role public.hierarchy_role;
-  v_notif_type public.notification_type;
-BEGIN
-  -- Cast and validate notification type
-  BEGIN
-    v_notif_type := p_type::public.notification_type;
-  EXCEPTION WHEN OTHERS THEN
-    v_notif_type := 'General'::public.notification_type;
-  END;
-
-  IF public.is_trusted_admin() THEN
-    INSERT INTO public.notifications (
-      recipient_id, title, message, type, link_tab, item_id
-    ) VALUES (
-      p_recipient_id, p_title, p_message, v_notif_type, p_link_tab, p_item_id
-    ) RETURNING id INTO v_new_id;
-    RETURN v_new_id;
-  END IF;
-
-  v_caller_id := auth.uid();
-  IF v_caller_id IS NULL THEN
-    RAISE EXCEPTION 'Security Policy Violation: Unauthenticated notification dispatch is prohibited.';
-  END IF;
-
-  v_is_exec := public.is_executive();
-  v_caller_role := public.auth_hierarchy_role();
-
-  -- Verify recipient exists
-  IF NOT EXISTS (SELECT 1 FROM public.profiles WHERE id = p_recipient_id) THEN
-    RAISE EXCEPTION 'Recipient profile does not exist.';
-  END IF;
-
-  -- Only executives or department leads can dispatch notifications
-  IF NOT v_is_exec AND v_caller_role NOT IN ('Department Head', 'Department Co-Head') THEN
-    RAISE EXCEPTION 'Security Policy Violation: Insufficient privileges to dispatch notifications.';
-  END IF;
-
-  -- Department leads can only notify members within their assigned department
-  IF NOT v_is_exec THEN
-    IF NOT EXISTS (
-      SELECT 1 FROM public.profiles
-      WHERE id = p_recipient_id AND (department_id = public.auth_department_id() OR department_id IS NULL)
-    ) THEN
-      RAISE EXCEPTION 'Security Policy Violation: Department leads can only notify members within their assigned department.';
-    END IF;
-  END IF;
-
-  INSERT INTO public.notifications (
-    recipient_id, title, message, type, link_tab, item_id
-  ) VALUES (
-    p_recipient_id, p_title, p_message, v_notif_type, p_link_tab, p_item_id
-  ) RETURNING id INTO v_new_id;
-
-  RETURN v_new_id;
-END;
-$$;
-
 -- ------------------------------------------------------------------------------
 -- 6. SECURITY DEFINER INTEGRITY & ANTI-TAMPER TRIGGERS
 -- ------------------------------------------------------------------------------
